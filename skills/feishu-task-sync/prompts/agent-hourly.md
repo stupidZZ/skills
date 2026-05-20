@@ -1,31 +1,42 @@
 # 飞书任务同步方案 B：每小时主 Agent 执行说明
 
-你是主 Agent 的后台定时任务。常规执行信息只写日志，不要发送到当前开发对话；只有异常、权限失败、无法写文件、无法创建任务等需要人工处理的问题，才在开发对话简要说明。
+> 任何 `{{SKILL_DIR}}` 占位符必须先被 Kian 启用此 Skill 时填入的实际安装路径
+> 替换。Skill 默认安装在 Kian 的 Skill 目录下（典型为 `~/.kian/skills/installed/feishu-task-sync/`）；
+> 用户可以通过下面命令获得最终路径：
+>
+> ```bash
+> kian skill show feishu-task-sync
+> ```
+>
+> bootstrap 阶段写入 `cronjob.json` 时，必须把所有 `{{SKILL_DIR}}` 替换成
+> 用户机器上的真实绝对路径，不要把占位符原样留到 cron 任务里。
+
+你是飞书任务后台助手的每小时定时任务。常规执行信息只写日志，不要发送到用户的主开发对话；只有异常、权限失败、无法写文件、无法创建任务等需要人工处理的问题，才在主开发对话简要说明。
 
 每小时执行：
 
 1. 运行采集：
 
 ```bash
-python3 /Users/zhangzheng/KianWorkspace/.kian/main-agent/tools/feishu-task-sync/collect.py --since-last-success
+python3 {{SKILL_DIR}}/scripts/collect.py --config {{SKILL_DIR}}/config.json --since-last-success
 ```
 
 2. 阅读：
 
 ```text
-/Users/zhangzheng/KianWorkspace/.kian/main-agent/tools/feishu-task-sync/output/collected/latest.json
+{{SKILL_DIR}}/output/collected/latest.json
 ```
 
 语义总结窗口以 `latest.json` 中的 `since` / `until` 为准；不要假设固定最近 1 小时。`window_mode` 为 `since-last-success` 时，窗口从上次全链路成功游标开始，最多回溯 3 天。
 
-采集范围包括：collect.py 主动从飞书云端按 chatId 拉取的最近聊天消息、最近变更的本地文档、飞书云文档/Wiki 中 @我的段落；本地 `chat/messages` 中 `provider=feishu` 的消息仅作为补充来源。默认不采集 Kian 本地对话、assistant 回复、tool 输出、system/thinking 内容，避免把开发对话、运行状态或日志误判为 Todo。
+采集范围包括：`collect.py` 主动从飞书云端按 chatId 拉取的最近聊天消息、最近变更的本地文档（`paths.docs_root`）、飞书云文档 / Wiki 中 @我的段落；本地 `chat/messages` 中 `provider=feishu` 的消息仅作为补充来源。默认不采集 Kian 本地对话、assistant 回复、tool 输出、system/thinking 内容。
 
-collect.py 默认 `--auth-mode auto`：若已通过 `feishu_user_auth.py` 完成用户 OAuth 授权，会优先使用 `state/user-auth.json` 中的 user token 读取用户本人可访问的飞书内容；未授权或刷新失败时退回应用/机器人身份。可从 `latest.json` 的 `auth_checks.auth_mode_used` 和 `diagnostics` 判断实际模式和 fallback 原因。
+`collect.py` 默认 `--auth-mode auto`：若已通过 `feishu_user_auth.py` 完成用户 OAuth 授权，会优先使用 `state/user-auth.json` 中的 user token；未授权或刷新失败时退回应用/机器人身份。可从 `latest.json` 的 `auth_checks.auth_mode_used` 和 `diagnostics` 判断实际模式和 fallback 原因。`paths.source` 字段会标明配置来源（`config` 或 `env`），便于排查是否仍指向旧路径。
 
 3. 只把明确 Todo 写入：
 
 ```text
-/Users/zhangzheng/KianWorkspace/.kian/main-agent/tools/feishu-task-sync/output/todos/latest-todos.json
+{{SKILL_DIR}}/output/todos/latest-todos.json
 ```
 
 输出 JSON 必须是 UTF-8、indent=2，结构如下：
@@ -56,8 +67,9 @@ collect.py 默认 `--auth-mode auto`：若已通过 `feishu_user_auth.py` 完成
 ```
 
 过滤规则：
+
 - 只保留明确要求我行动、跟进、确认、交付、回复、整理、修复、安排的事项。
-- 对飞书消息中的 `@_user_1` / `@_user_N` 这类接口脱敏占位符，不要自动推断为“@我”；只有在 metadata.mentions 中能确认 assignee open_id、文本明确称呼用户本人、或上下文强证据指向用户本人时，才创建任务。证据不足时只写入日志/摘要，不创建任务。
+- 对飞书消息中的 `@_user_1` / `@_user_N` 这类接口脱敏占位符，不要自动推断为“@我”；只有在 `metadata.mentions[].user_id == 我的 open_id` 或 `metadata.mentioned_assignee == true` 时才视为 @我。文本里的 `@_user_N` / `@某中文名` 不算证据。若证据不足，只写入日志/摘要，不创建任务。
 - 过滤闲聊、问题咨询、状态同步、背景信息、无明确行动对象的内容。
 - 过滤和 state / 最近 Todo 明显重复的事项。
 - 不要把“同步脚本运行状态”“无事项说明”“日报/提醒配置本身”创建为任务。
@@ -66,16 +78,20 @@ collect.py 默认 `--auth-mode auto`：若已通过 `feishu_user_auth.py` 完成
 4. 创建任务：
 
 ```bash
-python3 /Users/zhangzheng/KianWorkspace/.kian/main-agent/tools/feishu-task-sync/feishu_tasks.py create --input /Users/zhangzheng/KianWorkspace/.kian/main-agent/tools/feishu-task-sync/output/todos/latest-todos.json --mark-success-cursor
+python3 {{SKILL_DIR}}/scripts/feishu_tasks.py --config {{SKILL_DIR}}/config.json create \
+  --input {{SKILL_DIR}}/output/todos/latest-todos.json --mark-success-cursor
 ```
 
 只有 collect、Agent 写 Todo JSON、create 三段全链路成功，才允许推进游标。若 Agent 无法写出合法 Todo JSON，不要调用 `create`，也不要推进游标。
 
-5. 静默规则：
-- 无新 Todo：完全静默，只允许脚本写 `output/cron.log`。
-- 创建成功：完全静默，只允许脚本写报告和日志。
-- 异常：简要说明失败命令、错误摘要、是否需要用户处理。
+5. 心跳卡片：使用 `{{SKILL_DIR}}/prompts/heartbeat.md` 的模板，通过 `config.json.broadcast.heartbeat_channel_id` 指定的广播渠道（在 Kian 中即 `ListBroadcastChannels` 返回的 id）发送。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
 
-飞书云端聊天依赖 IM 会话与消息读取权限。若 `latest.json` 的 `auth_checks.im_message_api` 或 `diagnostics` 显示缺权限，提示用户在飞书开放平台补充并发布脚本返回的 `missing_scopes`。用户身份下常见需要：`im:chat:readonly`、`im:message:readonly`、`im:message.p2p_msg:get_as_user`、`im:message.group_msg:get_as_user`。日报/运行摘要只展示会话总数、有消息会话数、消息数和脱敏样例，不要列出完整 chatId/openId。
+6. 静默规则：
 
-若 `auth_checks.auth_mode_used=tenant` 且用户期望读取机器人不在的群聊/私聊/文档评论/通知，提示用户按 README 的“用户 OAuth 授权模式”配置 redirect URI `http://localhost:8765/feishu/oauth/callback`，运行 `python3 feishu_user_auth.py auth-url`，授权后用 `exchange --redirect-url` 或 `exchange --code` 写入 user token。
+- 无新 Todo / 创建成功：完全静默，只允许脚本写 `output/cron.log` 与心跳广播。
+- 异常：简要说明失败命令、错误摘要、是否需要用户处理；显著提示是否需要重新走 OAuth 授权。
+
+7. 接口与权限提示：
+
+- 当 `latest.json` 的 `auth_checks.task_api` / `im_message_api` / `doc_api` 返回缺权限时，提示用户去飞书开放平台补对应 `missing_scopes` 并发布版本，常见需要：`task:task:read`、`task:task:write`、`im:chat:readonly`、`im:message:readonly`、`im:message.p2p_msg:get_as_user`、`im:message.group_msg:get_as_user`、`drive:drive:readonly`、`docx:document:readonly`、`wiki:wiki:readonly`、`search:docs:read`、`offline_access`。
+- 若 `auth_mode_used = tenant`，提示用户走一次用户身份 OAuth：`python3 {{SKILL_DIR}}/scripts/feishu_user_auth.py --config {{SKILL_DIR}}/config.json auth-url`，授权后用 `exchange --redirect-url` 或 `exchange --code` 写入 user token；redirect URI 必须与 `config.json.feishu.redirect_uri`（默认 `http://localhost:8765/feishu/oauth/callback`）完全一致，并在飞书开放平台已发布。

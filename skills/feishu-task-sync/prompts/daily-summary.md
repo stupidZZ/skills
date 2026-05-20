@@ -1,5 +1,7 @@
 # 飞书同步 · 每天 11:00 摘要模板
 
+> 路径以 `{{SKILL_DIR}}` 为根。重点数据源：`{{SKILL_DIR}}/output/collected/latest.json`、`{{SKILL_DIR}}/output/latest-report.json`、`{{SKILL_DIR}}/state/sync-cursor.json`。bootstrap 阶段会把占位符替换成用户机器上的真实 Skill 安装路径。
+
 > 这是每天 11:00 的飞书摘要任务。它**不创建飞书任务**，只生成今日待办摘要 +
 > 后台运行摘要，并通过广播渠道发送。
 

@@ -1,5 +1,7 @@
 # 飞书同步 · 每小时心跳模板
 
+> 以下路径均以 `{{SKILL_DIR}}` 为根：bootstrap 阶段会把占位符替换为用户机器上的 Skill 安装路径。全部数据取自 `{{SKILL_DIR}}/output/collected/latest.json`、`{{SKILL_DIR}}/output/latest-report.json`、`{{SKILL_DIR}}/state/sync-cursor.json` 与 `{{SKILL_DIR}}/state/user-auth.json`；不要去读老版 main-agent 工作区路径。
+
 > 这是每小时同步任务结束后向广播渠道发送的运行心跳。所有数据**只能**取自本轮
 > `collect.py` 写入的 `output/collected/latest.json` 和 `feishu_tasks.py` 写入的
 > `output/latest-report.json`。不要使用 24h 累计来描述当前是否“缺 scope”。
