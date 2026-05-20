@@ -7,8 +7,8 @@
     "default_assignee_open_id": null
   },
   "broadcast": {
-    "heartbeat_channel_id": "1",
-    "daily_summary_channel_id": "1"
+    "heartbeat_channel_id": null,
+    "daily_summary_channel_id": null
   },
   "paths": {
     "workspace_root": null,

@@ -73,8 +73,11 @@ prompt as a fallback.
    - `feishu.app_secret`
    - `feishu.redirect_uri` (default `http://localhost:8765/feishu/oauth/callback`)
    - `feishu.default_assignee_open_id` (optional; will be discovered from OAuth)
-   - `broadcast.heartbeat_channel_id` (pick from `ListBroadcastChannels`)
-   - `broadcast.daily_summary_channel_id` (defaults to the heartbeat channel)
+   - `broadcast.heartbeat_channel_id` — required; pick from
+     `ListBroadcastChannels`. The example config ships as `null` on purpose
+     so installation cannot silently fall back to a stranger's channel id.
+   - `broadcast.daily_summary_channel_id` — optional; defaults to
+     `heartbeat_channel_id`.
    - Leave `paths.*` as `null` so the Skill manages `<SKILL_DIR>/state/` and
      `<SKILL_DIR>/output/` itself.
 3. **Validate config**:
@@ -145,8 +148,8 @@ fill it in. The example uses these defaults:
     "default_assignee_open_id": null
   },
   "broadcast": {
-    "heartbeat_channel_id": "1",
-    "daily_summary_channel_id": "1"
+    "heartbeat_channel_id": null,
+    "daily_summary_channel_id": null
   },
   "paths": {
     "workspace_root": null,
