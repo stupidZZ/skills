@@ -17,17 +17,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
-from feishu_user_auth import FeishuUserAuth, FeishuUserAuthError, STATE_PATH as USER_AUTH_STATE_PATH
+from feishu_user_auth import FeishuUserAuth, FeishuUserAuthError
+from runtime import (
+    ConfigError,
+    Settings,
+    add_config_argument,
+    ensure_runtime_dirs,
+    load_settings,
+)
 
 TZ = ZoneInfo("Asia/Shanghai")
-WORKSPACE_ROOT = Path("/Users/zhangzheng/KianWorkspace")
-AGENT_ROOT = WORKSPACE_ROOT / ".kian/main-agent"
-SETTINGS_PATH = WORKSPACE_ROOT / ".kian/settings.json"
-CHAT_ROOT = AGENT_ROOT / "chat"
-DOCS_ROOT = AGENT_ROOT / "docs"
-STATE_PATH = AGENT_ROOT / "tools/feishu-task-sync/state/state.json"
-REPORT_JSON = AGENT_ROOT / "tools/feishu-task-sync/output/latest-report.json"
-REPORT_MD = AGENT_ROOT / "tools/feishu-task-sync/output/latest-report.md"
 
 ACTION_PATTERNS = [
     r"\bTODO\b",
@@ -187,12 +186,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             "effect; full integration lands in 0.2.0."
         ),
     )
-    parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
-    parser.add_argument("--chat-root", default=str(CHAT_ROOT))
-    parser.add_argument("--docs-root", default=str(DOCS_ROOT))
-    parser.add_argument("--state-path", default=str(STATE_PATH))
-    parser.add_argument("--report-json", default=str(REPORT_JSON))
-    parser.add_argument("--report-md", default=str(REPORT_MD))
+    parser.add_argument("--chat-root", default=None, help="Override chat root; defaults to settings.paths.chat_root.")
+    parser.add_argument("--docs-root", default=None, help="Override docs root; defaults to settings.paths.docs_root.")
+    parser.add_argument("--state-path", default=None, help="Override the legacy state.json path.")
+    parser.add_argument("--report-json", default=None, help="Override the latest-report.json path.")
+    parser.add_argument("--report-md", default=None, help="Override the latest-report.md path.")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--min-score", type=int, default=3)
     parser.add_argument("--create", action="store_true", help="Actually create tasks in Feishu.")
@@ -891,24 +889,30 @@ def deduplicate_candidates(candidates: Iterable[CandidateTask], state: Dict[str,
 
 
 class FeishuClient:
-    def __init__(self, settings_path: Path, auth_mode: str = "tenant", user_auth_path: Path = USER_AUTH_STATE_PATH):
-        self.settings_path = settings_path
-        self.settings = JsonStore.load(settings_path, {})
-        try:
-            feishu = self.settings["chatChannels"]["feishu"]
-        except Exception as exc:
-            raise RuntimeError(f"Invalid settings file, missing chatChannels.feishu: {settings_path}") from exc
-        self.app_id = feishu.get("appId")
-        self.app_secret = feishu.get("appSecret")
-        self.user_ids = feishu.get("userIds") or []
+    def __init__(
+        self,
+        settings: Settings,
+        auth_mode: str = "tenant",
+        user_auth_path: Optional[Path] = None,
+    ):
         if auth_mode not in {"tenant", "user"}:
             raise RuntimeError(f"Invalid Feishu auth_mode: {auth_mode}")
+        self.settings = settings
+        self.app_id = settings.feishu.app_id
+        self.app_secret = settings.feishu.app_secret
+        self.user_ids = (
+            [settings.feishu.default_assignee_open_id]
+            if settings.feishu.default_assignee_open_id
+            else []
+        )
         self.auth_mode = auth_mode
-        self.user_auth_path = user_auth_path
+        self.user_auth_path = Path(user_auth_path or settings.paths.user_auth_path)
         self._user_auth: Optional[FeishuUserAuth] = None
         self._tenant_access_token: Optional[str] = None
         if not self.app_id or not self.app_secret:
-            raise RuntimeError("Missing Feishu appId/appSecret in settings.")
+            raise RuntimeError(
+                "feishu.app_id / feishu.app_secret missing from skill config."
+            )
 
     @staticmethod
     def _http_json(method: str, url: str, payload: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -950,7 +954,10 @@ class FeishuClient:
     @property
     def user_auth(self) -> FeishuUserAuth:
         if self._user_auth is None:
-            self._user_auth = FeishuUserAuth(self.settings_path, self.user_auth_path)
+            self._user_auth = FeishuUserAuth(
+                self.settings,
+                state_path=self.user_auth_path,
+            )
         return self._user_auth
 
     def user_access_token(self) -> str:
@@ -1147,15 +1154,26 @@ class FeishuClient:
         return data
 
 
-def discover_assignee_user_id(explicit: str, settings: Dict[str, Any], sessions: Dict[str, Dict[str, Any]], chat_root: Path) -> Optional[str]:
+def discover_assignee_user_id(
+    explicit: str,
+    settings: Any,
+    sessions: Dict[str, Dict[str, Any]],
+    chat_root: Path,
+) -> Optional[str]:
     if explicit:
         return explicit
-    try:
-        ids = settings["chatChannels"]["feishu"].get("userIds") or []
-        if ids and isinstance(ids[0], str) and ids[0].strip():
-            return ids[0].strip()
-    except Exception:
-        pass
+    # Support both the new ``Settings`` dataclass and legacy raw dicts.
+    if isinstance(settings, Settings):
+        configured = settings.feishu.default_assignee_open_id
+        if configured:
+            return configured
+    else:
+        try:
+            ids = settings["chatChannels"]["feishu"].get("userIds") or []  # type: ignore[index]
+            if ids and isinstance(ids[0], str) and ids[0].strip():
+                return ids[0].strip()
+        except Exception:
+            pass
 
     session_items = sorted(sessions.values(), key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
     for item in session_items:
@@ -1180,10 +1198,7 @@ def discover_assignee_user_id(explicit: str, settings: Dict[str, Any], sessions:
     # Scheme B may run from Kian-created local sessions that do not carry Feishu
     # sender metadata. In that case, recover the assignee from prior successful
     # task creation state instead of writing the open_id into global settings.
-    state_candidates = [
-        chat_root.parent / "tools/feishu-task-sync/state/state.json",
-        AGENT_ROOT / "tools/feishu-task-sync/state/state.json",
-    ]
+    state_candidates: List[Path] = [chat_root.parent / "tools/feishu-task-sync/state/state.json"]
     for state_path in state_candidates:
         try:
             processed = JsonStore.load(state_path, {}).get("processed", {})
@@ -1213,10 +1228,7 @@ def discover_assignee_user_id(explicit: str, settings: Dict[str, Any], sessions:
                     stack.extend(current)
 
     # Last-resort fallback: previous legacy logs include the resolved assignee.
-    log_candidates = [
-        chat_root.parent / "tools/feishu-task-sync/output/cron.log",
-        AGENT_ROOT / "tools/feishu-task-sync/output/cron.log",
-    ]
+    log_candidates: List[Path] = [chat_root.parent / "tools/feishu-task-sync/output/cron.log"]
     for log_path in log_candidates:
         try:
             text = log_path.read_text(encoding="utf-8", errors="ignore")[-200_000:]
@@ -1355,18 +1367,19 @@ def main(argv: Sequence[str]) -> int:
         print("旧入口 sync_feishu_tasks.py --create 保留为 deprecated fallback。")
         return 0
     args = parse_args(argv)
-    settings_path = Path(args.settings_path)
-    chat_root = Path(args.chat_root)
-    docs_root = Path(args.docs_root)
-    state_path = Path(args.state_path)
-    report_json = Path(args.report_json)
-    report_md = Path(args.report_md)
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
+    chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
+    docs_root = Path(args.docs_root) if args.docs_root else settings.paths.docs_root
+    state_path = Path(args.state_path) if args.state_path else settings.paths.state_main_path
+    report_json = Path(args.report_json) if args.report_json else settings.paths.report_json_path
+    report_md = Path(args.report_md) if args.report_md else settings.paths.report_md_path
 
     state = JsonStore.load(state_path, {"processed": {}})
-    client = FeishuClient(settings_path)
+    client = FeishuClient(settings)
     auth_check = client.check_task_api()
     sessions = load_sessions(chat_root)
-    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, client.settings, sessions, chat_root)
+    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
     feishu_doc_auth_check = {} if args.disable_feishu_doc_mentions else client.check_doc_api()
     feishu_doc_diagnostics: List[Dict[str, Any]] = []
 
@@ -1470,7 +1483,8 @@ def main(argv: Sequence[str]) -> int:
         "create_results": [asdict(item) for item in create_results],
         "skipped": skipped,
         "paths": {
-            "settings_path": str(settings_path),
+            "source": settings.config_source,
+            "config_path": str(settings.config_path),
             "chat_root": str(chat_root),
             "docs_root": str(docs_root),
             "state_path": str(state_path),
@@ -1511,6 +1525,9 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except SystemExit:
         raise
+    except ConfigError as exc:
+        print(f"[sync_feishu_tasks] config error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)

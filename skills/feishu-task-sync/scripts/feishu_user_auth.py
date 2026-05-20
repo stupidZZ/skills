@@ -16,12 +16,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from runtime import (
+    ConfigError,
+    Settings,
+    add_config_argument,
+    ensure_runtime_dirs,
+    load_settings,
+)
+
 TZ = ZoneInfo("Asia/Shanghai")
-WORKSPACE_ROOT = Path("/Users/zhangzheng/KianWorkspace")
-SETTINGS_PATH = WORKSPACE_ROOT / ".kian/settings.json"
-TOOL_ROOT = Path(__file__).resolve().parent
-STATE_PATH = TOOL_ROOT / "state/user-auth.json"
-DEFAULT_REDIRECT_URI = "http://localhost:8765/feishu/oauth/callback"
 AUTH_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 TOKEN_V2_URL = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
 TOKEN_V1_URL = "https://open.feishu.cn/open-apis/authen/v1/access_token"
@@ -33,6 +36,7 @@ USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 # (error 20043) when placed in the `scope` query parameter. Additional scopes
 # can be tested explicitly via `auth-url --scope ...`.
 DEFAULT_SCOPES = ["offline_access"]
+DEFAULT_REDIRECT_URI = "http://localhost:8765/feishu/oauth/callback"
 
 
 class FeishuUserAuthError(RuntimeError):
@@ -97,24 +101,21 @@ def iso_from_epoch(value: Optional[int]) -> Optional[str]:
 class FeishuUserAuth:
     def __init__(
         self,
-        settings_path: Path = SETTINGS_PATH,
-        state_path: Path = STATE_PATH,
-        redirect_uri: str = DEFAULT_REDIRECT_URI,
+        settings: Settings,
         scopes: Optional[Sequence[str]] = None,
+        state_path: Optional[Path] = None,
+        redirect_uri: Optional[str] = None,
     ):
-        self.settings_path = settings_path
-        self.state_path = state_path
-        self.redirect_uri = redirect_uri
+        self.settings = settings
+        self.state_path = Path(state_path or settings.paths.user_auth_path)
+        self.redirect_uri = redirect_uri or settings.feishu.redirect_uri
         self.scopes = list(DEFAULT_SCOPES if scopes is None else scopes)
-        self.settings = load_json(settings_path, {})
-        try:
-            feishu = self.settings["chatChannels"]["feishu"]
-        except Exception as exc:
-            raise FeishuUserAuthError(f"Invalid settings file, missing chatChannels.feishu: {settings_path}") from exc
-        self.app_id = feishu.get("appId")
-        self.app_secret = feishu.get("appSecret")
+        self.app_id = settings.feishu.app_id
+        self.app_secret = settings.feishu.app_secret
         if not self.app_id or not self.app_secret:
-            raise FeishuUserAuthError("Missing Feishu appId/appSecret in settings.")
+            raise FeishuUserAuthError(
+                "feishu.app_id / feishu.app_secret missing from skill config."
+            )
 
     def load_state(self) -> Dict[str, Any]:
         data = load_json(self.state_path, {})
@@ -265,20 +266,17 @@ class FeishuUserAuth:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Authorize Feishu user OAuth and manage user_access_token.")
-    # NOTE: --config is recognised but not yet honoured in 0.1.x; the wiring
-    # in step 2 of the 0.2.0 refactor will hook it up to scripts/runtime.py.
+    add_config_argument(parser)
     parser.add_argument(
-        "--config",
+        "--state-path",
         default=None,
-        help=(
-            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
-            "existing --settings-path / --state-path / --redirect-uri flags still "
-            "take effect; full integration lands in 0.2.0."
-        ),
+        help="Override the user-auth.json path (defaults to settings.paths.user_auth_path).",
     )
-    parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
-    parser.add_argument("--state-path", default=str(STATE_PATH))
-    parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI)
+    parser.add_argument(
+        "--redirect-uri",
+        default=None,
+        help="Override the OAuth redirect URI (defaults to settings.feishu.redirect_uri).",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     auth_url = subparsers.add_parser("auth-url", help="Print OAuth authorization URL.")
     auth_url.add_argument("--scope", action="append", default=None, help="OAuth scope to request; repeatable. Defaults to offline_access only. Use --no-scope to omit scope entirely.")
@@ -314,7 +312,14 @@ def main(argv: Sequence[str]) -> int:
             scopes = []
         elif args.scope is not None:
             scopes = args.scope
-    auth = FeishuUserAuth(Path(args.settings_path), Path(args.state_path), args.redirect_uri, scopes=scopes)
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
+    auth = FeishuUserAuth(
+        settings,
+        scopes=scopes,
+        state_path=Path(args.state_path) if args.state_path else None,
+        redirect_uri=args.redirect_uri,
+    )
     if args.command == "auth-url":
         print(f"redirect_uri: {auth.redirect_uri}")
         print(f"scopes: {' '.join(auth.scopes) if auth.scopes else '(none)'}")
@@ -355,6 +360,9 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except SystemExit:
         raise
+    except ConfigError as exc:
+        print(f"[feishu_user_auth] config error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)

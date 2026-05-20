@@ -12,10 +12,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from sync_feishu_tasks import (
-    AGENT_ROOT,
-    CHAT_ROOT,
-    DOCS_ROOT,
-    SETTINGS_PATH,
     TZ,
     FeishuApiError,
     FeishuClient,
@@ -34,12 +30,15 @@ from sync_feishu_tasks import (
     load_sessions,
     parse_metadata,
 )
-from feishu_user_auth import FeishuUserAuthError, STATE_PATH as USER_AUTH_STATE_PATH
+from feishu_user_auth import FeishuUserAuthError
+from runtime import (
+    ConfigError,
+    Settings,
+    add_config_argument,
+    ensure_runtime_dirs,
+    load_settings,
+)
 
-DEFAULT_OUTPUT = AGENT_ROOT / "tools/feishu-task-sync/output/collected/latest.json"
-COLLECTED_DIR = AGENT_ROOT / "tools/feishu-task-sync/output/collected"
-DEFAULT_CURSOR_PATH = AGENT_ROOT / "tools/feishu-task-sync/state/sync-cursor.json"
-DEFAULT_FEISHU_CHAT_CACHE_DIR = AGENT_ROOT / "tools/feishu-task-sync/output/feishu-chat-cache"
 FEISHU_DOC_SCOPE_HINTS = [
     "docx:document:readonly",
     "wiki:wiki:readonly",
@@ -50,26 +49,15 @@ FEISHU_DOC_SCOPE_HINTS = [
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect recent Feishu/local source items for Agent semantic Todo extraction.")
-    # NOTE: --config is recognised but not yet honoured in 0.1.x; step 2 of the
-    # 0.2.0 refactor will route every path/credential through scripts/runtime.py.
-    parser.add_argument(
-        "--config",
-        default=None,
-        help=(
-            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
-            "legacy --settings-path / --chat-root / --docs-root flags still take "
-            "effect; full integration lands in 0.2.0."
-        ),
-    )
-    parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
-    parser.add_argument("--chat-root", default=str(CHAT_ROOT))
-    parser.add_argument("--docs-root", default=str(DOCS_ROOT))
+    add_config_argument(parser)
+    parser.add_argument("--chat-root", default=None, help="Override chat root; defaults to settings.paths.chat_root.")
+    parser.add_argument("--docs-root", default=None, help="Override docs root; defaults to settings.paths.docs_root.")
     parser.add_argument("--since-hours", type=float, default=1)
     parser.add_argument("--since-last-success", action="store_true")
-    parser.add_argument("--cursor-path", default=str(DEFAULT_CURSOR_PATH))
+    parser.add_argument("--cursor-path", default=None, help="Override sync-cursor.json path.")
     parser.add_argument("--max-lookback-days", type=int, default=3)
     parser.add_argument("--retention-days", type=int, default=3)
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--output", default=None, help="Override the collected/latest.json output path.")
     parser.add_argument("--print-json", action="store_true")
     parser.add_argument("--disable-feishu-doc-mentions", action="store_true")
     parser.add_argument("--feishu-doc-lookback-days", type=int, default=7)
@@ -80,7 +68,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--enable-feishu-cloud-chat", dest="enable_feishu_cloud_chat", action="store_true", help="Pull recent Feishu chat messages from Feishu cloud; enabled by default.")
     parser.add_argument("--disable-feishu-cloud-chat", dest="enable_feishu_cloud_chat", action="store_false", help="Disable Feishu cloud chat message collection.")
     parser.add_argument("--feishu-chat-id", action="append", default=[], help="Feishu chat_id to collect; may be passed multiple times. Defaults to provider=feishu chatId values from chat/sessions.json.")
-    parser.add_argument("--feishu-cloud-chat-cache-dir", default=str(DEFAULT_FEISHU_CHAT_CACHE_DIR))
+    parser.add_argument("--feishu-cloud-chat-cache-dir", default=None, help="Override Feishu chat cache directory.")
     parser.add_argument("--feishu-cloud-chat-retention-days", type=int, default=3)
     parser.add_argument("--auth-mode", choices=("auto", "tenant", "user"), default="auto", help="Feishu read auth mode. auto prefers OAuth user token and falls back to tenant/app token.")
     return parser.parse_args(argv)
@@ -132,8 +120,8 @@ def mark_cursor_started(path: Path, now: datetime) -> Dict[str, Any]:
     return cursor
 
 
-def compute_window(args: argparse.Namespace, now: datetime) -> Dict[str, Any]:
-    cursor_path = Path(args.cursor_path)
+def compute_window(args: argparse.Namespace, now: datetime, default_cursor_path: Path) -> Dict[str, Any]:
+    cursor_path = Path(args.cursor_path) if args.cursor_path else default_cursor_path
     max_lookback_days = max(1, int(args.max_lookback_days))
     if args.since_last_success:
         cursor = mark_cursor_started(cursor_path, now)
@@ -716,15 +704,19 @@ def redact_token_fields(value: Any) -> Any:
     return value
 
 
-def resolve_feishu_client(args: argparse.Namespace, diagnostics: List[Dict[str, Any]], auth_checks: Dict[str, Any]) -> FeishuClient:
+def resolve_feishu_client(
+    args: argparse.Namespace,
+    settings: Settings,
+    diagnostics: List[Dict[str, Any]],
+    auth_checks: Dict[str, Any],
+) -> FeishuClient:
     requested = str(args.auth_mode)
-    settings_path = Path(args.settings_path)
     auth_checks["auth_mode_requested"] = requested
     if requested == "tenant":
         auth_checks["auth_mode_used"] = "tenant"
-        return FeishuClient(settings_path, auth_mode="tenant")
+        return FeishuClient(settings, auth_mode="tenant")
 
-    user_client = FeishuClient(settings_path, auth_mode="user", user_auth_path=USER_AUTH_STATE_PATH)
+    user_client = FeishuClient(settings, auth_mode="user")
     try:
         status = user_client.user_auth_status()
         auth_checks["user_auth"] = status
@@ -758,24 +750,31 @@ def resolve_feishu_client(args: argparse.Namespace, diagnostics: List[Dict[str, 
             "reason": "user token missing, expired, or refresh failed",
         }
     )
-    return FeishuClient(settings_path, auth_mode="tenant")
+    return FeishuClient(settings, auth_mode="tenant")
 
 
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
     now = datetime.now(TZ)
-    window = compute_window(args, now)
+    window = compute_window(args, now, settings.paths.sync_cursor_path)
     since = window["since"]
     until = window["until"]
-    chat_root = Path(args.chat_root)
-    docs_root = Path(args.docs_root)
-    output_path = Path(args.output)
+    chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
+    docs_root = Path(args.docs_root) if args.docs_root else settings.paths.docs_root
+    output_path = Path(args.output) if args.output else settings.paths.collected_dir / "latest.json"
+    feishu_chat_cache_dir = (
+        Path(args.feishu_cloud_chat_cache_dir)
+        if args.feishu_cloud_chat_cache_dir
+        else settings.paths.feishu_chat_cache_dir
+    )
     sessions = load_sessions(chat_root)
     diagnostics: List[Dict[str, Any]] = []
     auth_checks: Dict[str, Any] = {}
 
-    client = resolve_feishu_client(args, diagnostics, auth_checks)
-    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, client.settings, sessions, chat_root)
+    client = resolve_feishu_client(args, settings, diagnostics, auth_checks)
+    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
     feishu_chat_ids = discover_feishu_chat_ids(args.feishu_chat_id, sessions)
     if args.enable_feishu_cloud_chat:
         for cloud_chat_id in discover_feishu_cloud_chat_ids(client, diagnostics):
@@ -796,7 +795,7 @@ def main(argv: Sequence[str]) -> int:
                 sessions,
                 since,
                 until,
-                Path(args.feishu_cloud_chat_cache_dir),
+                feishu_chat_cache_dir,
                 diagnostics,
                 now,
                 assignee_user_id=assignee_user_id,
@@ -861,13 +860,16 @@ def main(argv: Sequence[str]) -> int:
             "enable_feishu_cloud_chat": bool(args.enable_feishu_cloud_chat),
             "feishu_chat_count": len(feishu_chat_ids),
             "feishu_chat_id_samples": [redact_identifier(chat_id) for chat_id in feishu_chat_ids[:10]],
-            "feishu_cloud_chat_cache_dir": str(Path(args.feishu_cloud_chat_cache_dir)),
+            "feishu_cloud_chat_cache_dir": str(feishu_chat_cache_dir),
             "feishu_cloud_chat_retention_days": args.feishu_cloud_chat_retention_days,
         },
         "paths": {
+            "source": settings.config_source,
+            "config_path": str(settings.config_path),
             "chat_root": str(chat_root),
             "docs_root": str(docs_root),
             "output": str(output_path),
+            "feishu_cloud_chat_cache_dir": str(feishu_chat_cache_dir),
         },
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -878,14 +880,14 @@ def main(argv: Sequence[str]) -> int:
     removed = gc_dir(output_path.parent, args.retention_days, now)
     diagnostics.append({"source": "collector_gc", "ok": True, "removed": removed, "retention_days": args.retention_days})
     if args.enable_feishu_cloud_chat:
-        removed_chat_cache = gc_dir(Path(args.feishu_cloud_chat_cache_dir), args.feishu_cloud_chat_retention_days, now)
+        removed_chat_cache = gc_dir(feishu_chat_cache_dir, args.feishu_cloud_chat_retention_days, now)
         diagnostics.append(
             {
                 "source": "feishu_cloud_chat_cache_gc",
                 "ok": True,
                 "removed": removed_chat_cache,
                 "retention_days": args.feishu_cloud_chat_retention_days,
-                "cache_dir": str(Path(args.feishu_cloud_chat_cache_dir)),
+                "cache_dir": str(feishu_chat_cache_dir),
             }
         )
     JsonStore.save(output_path, report)
@@ -899,6 +901,9 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except SystemExit:
         raise
+    except ConfigError as exc:
+        print(f"[collect] config error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)

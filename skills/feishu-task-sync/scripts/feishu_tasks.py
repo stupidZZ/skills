@@ -13,13 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sync_feishu_tasks import (
-    AGENT_ROOT,
-    CHAT_ROOT,
-    REPORT_JSON,
-    REPORT_MD,
-    SETTINGS_PATH,
     SKIP_STATUSES,
-    STATE_PATH,
     TZ,
     FeishuApiError,
     FeishuClient,
@@ -27,9 +21,13 @@ from sync_feishu_tasks import (
     discover_assignee_user_id,
     load_sessions,
 )
-
-CRON_LOG = AGENT_ROOT / "tools/feishu-task-sync/output/cron.log"
-DEFAULT_CURSOR_PATH = AGENT_ROOT / "tools/feishu-task-sync/state/sync-cursor.json"
+from runtime import (
+    ConfigError,
+    Settings,
+    add_config_argument,
+    ensure_runtime_dirs,
+    load_settings,
+)
 
 
 @dataclass
@@ -45,29 +43,18 @@ class CreateResult:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create Feishu Tasks from Agent-curated Todo JSON.")
-    # NOTE: --config is recognised but not yet honoured in 0.1.x; step 2 of the
-    # 0.2.0 refactor will route every path/credential through scripts/runtime.py.
-    parser.add_argument(
-        "--config",
-        default=None,
-        help=(
-            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
-            "legacy --settings-path / --state-path / --report-* flags still take "
-            "effect; full integration lands in 0.2.0."
-        ),
-    )
-    parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
-    parser.add_argument("--chat-root", default=str(CHAT_ROOT))
-    parser.add_argument("--state-path", default=str(STATE_PATH))
-    parser.add_argument("--report-json", default=str(REPORT_JSON))
-    parser.add_argument("--report-md", default=str(REPORT_MD))
-    parser.add_argument("--cron-log", default=str(CRON_LOG))
+    add_config_argument(parser)
+    parser.add_argument("--chat-root", default=None, help="Override chat root; defaults to settings.paths.chat_root.")
+    parser.add_argument("--state-path", default=None, help="Override the legacy state.json path.")
+    parser.add_argument("--report-json", default=None, help="Override the latest-report.json path.")
+    parser.add_argument("--report-md", default=None, help="Override the latest-report.md path.")
+    parser.add_argument("--cron-log", default=None, help="Override the cron.log path.")
     parser.add_argument("--assignee-user-id", default="")
     subparsers = parser.add_subparsers(dest="command")
 
     create = subparsers.add_parser("create", help="Create Feishu Tasks from Todo JSON.")
     create.add_argument("--input", required=True)
-    create.add_argument("--cursor-path", default=str(DEFAULT_CURSOR_PATH))
+    create.add_argument("--cursor-path", default=None, help="Override sync-cursor.json path.")
     create.add_argument("--mark-success-cursor", action="store_true")
     create.add_argument("--print-json", action="store_true")
 
@@ -270,47 +257,64 @@ def save_report(report_json: Path, report_md: Path, report: Dict[str, Any]) -> N
 
 
 def command_auth_check(args: argparse.Namespace) -> int:
-    client = FeishuClient(Path(args.settings_path))
-    sessions = load_sessions(Path(args.chat_root))
-    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, client.settings, sessions, Path(args.chat_root))
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
+    chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
+    report_json = Path(args.report_json) if args.report_json else settings.paths.report_json_path
+    report_md = Path(args.report_md) if args.report_md else settings.paths.report_md_path
+    client = FeishuClient(settings)
+    sessions = load_sessions(chat_root)
+    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
     auth_check = client.check_task_api()
     report = {
         "generated_at": datetime.now(TZ).isoformat(),
         "mode": "auth-check",
         "assignee_user_id": assignee_user_id,
         "auth_check": auth_check,
+        "paths": {
+            "source": settings.config_source,
+            "config_path": str(settings.config_path),
+            "report_json": str(report_json),
+            "report_md": str(report_md),
+        },
     }
-    save_report(Path(args.report_json), Path(args.report_md), report)
+    save_report(report_json, report_md, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if auth_check.get("ok") else 2
 
 
 def command_gc(args: argparse.Namespace) -> int:
-    state_path = Path(args.state_path)
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
+    state_path = Path(args.state_path) if args.state_path else settings.paths.state_main_path
+    cron_log = Path(args.cron_log) if args.cron_log else settings.paths.cron_log
     state = JsonStore.load(state_path, {"processed": {}})
     state, removed = gc_state_entries(state, datetime.now(TZ))
     JsonStore.save(state_path, state)
-    log_line(Path(args.cron_log), f"feishu_tasks gc removed={removed}")
+    log_line(cron_log, f"feishu_tasks gc removed={removed}")
     print(json.dumps({"ok": True, "removed": removed}, ensure_ascii=False, indent=2))
     return 0
 
 
 def command_create(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    ensure_runtime_dirs(settings)
     now = datetime.now(TZ)
     input_path = Path(args.input)
-    state_path = Path(args.state_path)
-    cursor_path = Path(args.cursor_path)
-    report_json = Path(args.report_json)
-    report_md = Path(args.report_md)
-    cron_log = Path(args.cron_log)
+    state_path = Path(args.state_path) if args.state_path else settings.paths.state_main_path
+    cursor_path = Path(args.cursor_path) if args.cursor_path else settings.paths.sync_cursor_path
+    report_json = Path(args.report_json) if args.report_json else settings.paths.report_json_path
+    report_md = Path(args.report_md) if args.report_md else settings.paths.report_md_path
+    cron_log = Path(args.cron_log) if args.cron_log else settings.paths.cron_log
+    chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
     todos, payload = load_todos(input_path)
     state = JsonStore.load(state_path, {"processed": {}})
     state, removed_by_gc = gc_state_entries(state, now)
     processed = dict(state.get("processed", {}))
 
-    client = FeishuClient(Path(args.settings_path))
-    sessions = load_sessions(Path(args.chat_root))
-    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, client.settings, sessions, Path(args.chat_root))
+    client = FeishuClient(settings)
+    sessions = load_sessions(chat_root)
+    assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
 
     results: List[CreateResult] = []
     skipped: List[Dict[str, Any]] = []
@@ -415,6 +419,15 @@ def command_create(args: argparse.Namespace) -> int:
         "results": [asdict(item) for item in results],
         "skipped": skipped,
     }
+    report["paths"] = {
+        "source": settings.config_source,
+        "config_path": str(settings.config_path),
+        "state_path": str(state_path),
+        "report_json": str(report_json),
+        "report_md": str(report_md),
+        "cron_log": str(cron_log),
+        "cursor_path": str(cursor_path),
+    }
     save_report(report_json, report_md, report)
     log_line(
         cron_log,
@@ -425,6 +438,25 @@ def command_create(args: argparse.Namespace) -> int:
     return 1 if failed_count else 0
 
 
+def _failure_cursor(args: argparse.Namespace) -> None:
+    """Best-effort: mark the cursor as failed before re-raising."""
+    try:
+        settings = load_settings(args.config)
+    except ConfigError:
+        return
+    cursor_path = Path(args.cursor_path) if args.cursor_path else settings.paths.sync_cursor_path
+    cron_log = Path(args.cron_log) if args.cron_log else settings.paths.cron_log
+    failed_at = datetime.now(TZ)
+    try:
+        update_cursor(cursor_path, failed_at, "failed", False)
+        log_line(
+            cron_log,
+            f"feishu_tasks create failed_before_report input={getattr(args, 'input', '')} cursor_status=failed",
+        )
+    except Exception:
+        pass
+
+
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     if args.command == "create":
@@ -432,9 +464,7 @@ def main(argv: Sequence[str]) -> int:
             return command_create(args)
         except Exception:
             if getattr(args, "mark_success_cursor", False):
-                failed_at = datetime.now(TZ)
-                update_cursor(Path(args.cursor_path), failed_at, "failed", False)
-                log_line(Path(args.cron_log), f"feishu_tasks create failed_before_report input={getattr(args, 'input', '')} cursor_status=failed")
+                _failure_cursor(args)
             raise
     if args.command == "gc":
         return command_gc(args)
@@ -452,6 +482,9 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except SystemExit:
         raise
+    except ConfigError as exc:
+        print(f"[feishu_tasks] config error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)
