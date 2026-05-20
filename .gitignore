@@ -1,0 +1,23 @@
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Per-user Skill runtime state — must never be committed.
+# Skill folders are allowed, but everything below is treated as user data.
+skills/*/state/
+skills/*/output/
+skills/*/cache/
+skills/*/.env
+skills/*/config.local.json
+
+# OAuth / Feishu secrets that may leak through copy-paste mistakes.
+**/user-auth.json
+**/access_token*
+**/refresh_token*
+**/settings.local.json
