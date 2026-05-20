@@ -50,6 +50,17 @@ FEISHU_DOC_SCOPE_HINTS = [
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect recent Feishu/local source items for Agent semantic Todo extraction.")
+    # NOTE: --config is recognised but not yet honoured in 0.1.x; step 2 of the
+    # 0.2.0 refactor will route every path/credential through scripts/runtime.py.
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
+            "legacy --settings-path / --chat-root / --docs-root flags still take "
+            "effect; full integration lands in 0.2.0."
+        ),
+    )
     parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
     parser.add_argument("--chat-root", default=str(CHAT_ROOT))
     parser.add_argument("--docs-root", default=str(DOCS_ROOT))

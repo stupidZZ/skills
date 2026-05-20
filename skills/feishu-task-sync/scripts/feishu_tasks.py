@@ -45,6 +45,17 @@ class CreateResult:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create Feishu Tasks from Agent-curated Todo JSON.")
+    # NOTE: --config is recognised but not yet honoured in 0.1.x; step 2 of the
+    # 0.2.0 refactor will route every path/credential through scripts/runtime.py.
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
+            "legacy --settings-path / --state-path / --report-* flags still take "
+            "effect; full integration lands in 0.2.0."
+        ),
+    )
     parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
     parser.add_argument("--chat-root", default=str(CHAT_ROOT))
     parser.add_argument("--state-path", default=str(STATE_PATH))

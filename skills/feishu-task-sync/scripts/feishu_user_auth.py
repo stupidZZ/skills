@@ -265,6 +265,17 @@ class FeishuUserAuth:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Authorize Feishu user OAuth and manage user_access_token.")
+    # NOTE: --config is recognised but not yet honoured in 0.1.x; the wiring
+    # in step 2 of the 0.2.0 refactor will hook it up to scripts/runtime.py.
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to feishu-task-sync config.json. Recognised in 0.1.x but the "
+            "existing --settings-path / --state-path / --redirect-uri flags still "
+            "take effect; full integration lands in 0.2.0."
+        ),
+    )
     parser.add_argument("--settings-path", default=str(SETTINGS_PATH))
     parser.add_argument("--state-path", default=str(STATE_PATH))
     parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI)

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "feishu": {
+    "app_id": "cli_xxx",
+    "app_secret": "REPLACE_ME",
+    "redirect_uri": "http://localhost:8765/feishu/oauth/callback",
+    "default_assignee_open_id": null
+  },
+  "broadcast": {
+    "heartbeat_channel_id": "1",
+    "daily_summary_channel_id": "1"
+  },
+  "paths": {
+    "workspace_root": null,
+    "agent_root": null,
+    "chat_root": null,
+    "docs_root": null,
+    "state_dir": null,
+    "output_dir": null,
+    "cron_log": null
+  },
+  "retention": {
+    "collected_days": 3,
+    "feishu_chat_cache_days": 3,
+    "state_success_days": 3,
+    "state_failed_days": 14
+  }
+}
