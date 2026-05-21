@@ -3,6 +3,30 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.2.1 – interactive bootstrap (in development)
+
+- New `scripts/bootstrap.py` with four subcommands:
+  - `init` — interactive prompts (uses `getpass` for the secret) and writes
+    `config.json` (chmod 600) with timestamped backups of any pre-existing
+    file.
+  - `init-from-json` — non-interactive variant for Kian agents; reads a JSON
+    document from `--input <path>` (or `--input -` for stdin) and produces
+    the same masked summary on success.
+  - `status` — local-only summary (config, paths, OAuth presence, cursor),
+    never touches Feishu APIs and always masks the app secret.
+  - `doctor` — end-to-end health check that hits the Feishu task / IM chat /
+    IM messages / drive / docs-api search APIs under the user token, reports
+    `missing_scopes`, and surfaces stale `main-agent/tools/feishu-task-sync`
+    paths in `cronjob.json` as suggestions.
+- SKILL.md “Activation rules” updated to drive the agent through
+  `bootstrap.py init-from-json` for first-time setup and `bootstrap.py doctor`
+  before enabling cron. `bootstrap.py` itself still refuses to edit
+  `cronjob.json` — picking `targetAgentId` and the schedule remains the
+  Kian agent's responsibility.
+- Token redaction in bootstrap output preserves boolean flags such as
+  `has_user_access_token` while masking any string field whose key contains
+  `access_token`, `refresh_token`, `secret`, or `client_secret`.
+
 ## 0.2.0 – portable Skill (BREAKING)
 
 This is the first version that can be installed on any Kian user's machine

@@ -7,7 +7,7 @@ description: |
   user added as assignee, and broadcasts hourly heartbeats plus a daily 11:00
   summary. Activate this skill when the user wants Kian to keep their Feishu
   Tasks in sync with recent Feishu activity without flooding the main chat.
-version: 0.2.0
+version: 0.2.1
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -66,13 +66,25 @@ prompt as a fallback.
    prompt files and example commands use `{{SKILL_DIR}}` as a placeholder; the
    bootstrap step must replace it with the real absolute path before writing
    any cron task.
-2. **Check `<SKILL_DIR>/config.json`**. If missing, run `scripts/bootstrap.py`
-   (planned, see `Known Limitations`) — or in 0.2.0 today, ask the user in
-   natural language for these fields and write the file yourself:
+2. **Check `<SKILL_DIR>/config.json`**. If missing, drive the user through
+   `scripts/bootstrap.py`:
+
+   - **In a Kian conversation** (preferred): collect the fields below from the
+     user in natural language, then call
+     `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json init-from-json --input -`
+     with a JSON document containing those fields. The script writes
+     `config.json` (chmod 600), backs up any pre-existing file as
+     `config.json.bak-<timestamp>`, and prints a masked summary.
+   - **In a terminal**: the user can run
+     `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json init`
+     for an interactive prompt (uses `getpass` for the secret).
+
+   Required fields:
+
    - `feishu.app_id`
    - `feishu.app_secret`
    - `feishu.redirect_uri` (default `http://localhost:8765/feishu/oauth/callback`)
-   - `feishu.default_assignee_open_id` (optional; will be discovered from OAuth)
+   - `feishu.default_assignee_open_id` (optional; discovered from OAuth later)
    - `broadcast.heartbeat_channel_id` — required; pick from
      `ListBroadcastChannels`. The example config ships as `null` on purpose
      so installation cannot silently fall back to a stranger's channel id.
@@ -80,20 +92,28 @@ prompt as a fallback.
      `heartbeat_channel_id`.
    - Leave `paths.*` as `null` so the Skill manages `<SKILL_DIR>/state/` and
      `<SKILL_DIR>/output/` itself.
-3. **Validate config**:
-   `python3 {{SKILL_DIR}}/scripts/runtime.py --config {{SKILL_DIR}}/config.json`
-   prints the resolved settings (secret masked). It will exit non-zero with an
-   actionable error when fields are missing.
+3. **Validate config and runtime**:
+   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json status`
+   shows the local view (config, paths, OAuth presence, cursor) without
+   touching Feishu APIs. It always masks `app_secret`.
 4. **OAuth bootstrap** (see `OAuth Bootstrap` below) once before the first
    cron run, so `auth_checks.auth_mode_used` is `user` in heartbeats.
-5. **Create a dedicated background agent** (recommended name: 飞书任务后台助手)
+5. **End-to-end health check**:
+   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json doctor`
+   hits all Feishu APIs the skill needs (task, im chat, im messages, drive,
+   docs-api search) under the user token, reports `missing_scopes`, and also
+   sanity-checks `cronjob.json` for stale `main-agent/tools/feishu-task-sync`
+   paths. Exit code 0 means “safe to start cron”.
+6. **Create a dedicated background agent** (recommended name: 飞书任务后台助手)
    and bind both cron jobs to it via `targetAgentId`. Do **not** bind the
    hourly heartbeat or the daily summary to the user's main dev chat agent –
    it would flood the conversation.
-6. **Register cron jobs** in Kian's `cronjob.json` (5-field, minute-level)
+7. **Register cron jobs** in Kian's `cronjob.json` (5-field, minute-level)
    using the hourly and daily prompts shipped with this Skill. Substitute
    `{{SKILL_DIR}}` with the real absolute Skill path when writing the cron
-   `content`.
+   `content`. `bootstrap.py` does **not** write to `cronjob.json`; that is the
+   agent's job because picking the target agent and the schedule must remain
+   under the user's control.
 
 ## When to use
 
@@ -306,11 +326,9 @@ broadcast, log, or commit.
 
 ## Known Limitations (0.2.0)
 
-- `scripts/bootstrap.py` is the planned interactive bootstrap (selected as A2
-  + B3 in the design). 0.2.0 ships the validation surface (`runtime.py` exits
-  non-zero with actionable messages, the hourly cron prompt re-checks
-  `config.json`), but the actual one-shot bootstrap CLI is scheduled for a
-  follow-up patch release.
+- `scripts/bootstrap.py` lands in 0.2.1 (interactive + JSON-driven init,
+  local `status`, end-to-end `doctor`). It deliberately does **not** edit
+  `cronjob.json`; the activating Kian agent owns that step.
 - The cron log (`output/cron.log`) is append-only; planned: rotate at 50MB /
   7 days.
 - `refresh_expires_at` is `None` in practice because Feishu does not return
