@@ -103,15 +103,7 @@ Kian 会调用 `skill-management` 把仓库 clone 到缓存，找到
 
 ### 第 2 句
 
-在同一个对话里直接发触发短语，**任意一个**都行：
-
-```
-开始
-```
-
-```
-初始化
-```
+开启一个新对话，并发送触发短语，**任意一个**都行：
 
 ```
 启用 feishu-task-sync
@@ -119,10 +111,6 @@ Kian 会调用 `skill-management` 把仓库 clone 到缓存，找到
 
 ```
 install feishu-task-sync
-```
-
-```
-安装飞书同步
 ```
 
 Kian Agent 看到任意触发短语，会立刻按 `SKILL.md` 顶部的“激活规则”驱动
