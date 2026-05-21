@@ -1,13 +1,15 @@
 ---
 name: feishu-task-sync
 description: |
-  Background Feishu→Feishu Tasks sync skill for Kian. Pulls recent Feishu
-  chats / docs / wiki / @-mentions for the authorized user, asks Kian to
-  semantically extract actionable Todos, creates them as Feishu Tasks with the
-  user added as assignee, and broadcasts hourly heartbeats plus a daily 11:00
-  summary. Activate this skill when the user wants Kian to keep their Feishu
-  Tasks in sync with recent Feishu activity without flooding the main chat.
-version: 0.2.2
+  飞书 Todo 后台同步 Skill。安装后用户在 Kian 对话里说"开始" / "初始化"
+  / "启用 feishu-task-sync" / "install feishu-task-sync" 等触发短语，
+  Agent 必须立刻按本 SKILL.md 顶部的"激活规则"驱动完整安装流程：收
+  config 字段 → 调 bootstrap.py install 走 OAuth → 自动 first-run 心跳
+  → 写 cron 并绑定专用后台 Agent。日常运行时本 Skill 每小时让 Agent 自
+  己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义提炼 Todo，调用
+  feishu_tasks.py 创建飞书任务并加用户为 assignee；同时每小时心跳 +
+  每日 11:00 摘要走广播渠道，绝不污染主对话。
+version: 0.2.3
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -28,345 +30,145 @@ required_user_scopes:
   - offline_access
 config_schema_version: 1
 state_schema_version: 1
+trigger_phrases:
+  - 开始
+  - 初始化
+  - 启用 feishu-task-sync
+  - install feishu-task-sync
+  - 安装飞书同步
 ---
 
-# Feishu Task Sync
+# 飞书 Todo 后台同步 Skill（Agent 视角）
 
-This Skill turns Kian into a background watcher that:
+> 本文档面向 Kian Agent。**用户向导请看 `README.md`**（同目录），不要把
+> README 的内容粘进对话；本文件只描述 Agent 在不同阶段应当如何驱动安装、
+> 运行、卸载这套 Skill。
 
-1. **Collects** new Feishu material since the last successful run (cursor-based,
-   capped at 3 days). Sources: Feishu chats (cloud IM), Feishu docs / Wiki /
-   doc-mentions, and the agent's local docs.
-2. **Asks Kian** to semantically pick out the real Todos from that material
-   (filtering chit-chat, status updates, false positives, ambiguous placeholder
-   mentions, etc.).
-3. **Creates Feishu Tasks** for the picked Todos, attaching context (original
-   message, links, sender, time) and adding the authorized user as assignee.
-4. **Broadcasts an hourly heartbeat** to the user's broadcast channel for
-   observability/debug, and a **daily 11:00 summary** with both today's todos
-   and the past period's run stats.
+## 激活规则（必读）
 
-The Skill ships with:
+当用户在对话中出现以下任一信号时，Agent 必须**立刻**开始“引导式安装”，
+不得反问“你想做什么”：
 
-- `scripts/` – Python entrypoints (`runtime.py`, `collect.py`,
-  `feishu_tasks.py`, `feishu_user_auth.py`, the legacy fallback
-  `sync_feishu_tasks.py`, and the one-off `migrate_0_2.py`).
-- `prompts/agent-hourly.md` – the natural-language runbook the background
-  agent follows every hour.
-- `prompts/heartbeat.md` / `prompts/daily-summary.md` – the broadcast templates.
-- `config.example.json` – the schema for the per-user `config.json`.
+- 用户说出 frontmatter 中任一 `trigger_phrases`。
+- 用户提到 “装好这个 Skill 但不知道怎么开始 / 怎么用”。
+- Agent 加载到本 Skill 且检测到 `<SKILL_DIR>/config.json` 不存在。
 
-## Activation rules (read first)
+引导式安装一共走 6 步，Agent 必须按顺序执行：
 
-When Kian activates this Skill for a user, perform these checks **before**
-running any cron content. The same checks are also part of the hourly cron
-prompt as a fallback.
-
-1. **Locate the Skill directory** (`<SKILL_DIR>`) on the user's machine. All
-   prompt files and example commands use `{{SKILL_DIR}}` as a placeholder; the
-   bootstrap step must replace it with the real absolute path before writing
-   any cron task.
-2. **Check `<SKILL_DIR>/config.json`**. If missing, drive the user through
-   `scripts/bootstrap.py`:
-
-   - **In a Kian conversation** (preferred): collect the fields below from the
-     user in natural language, then call
-     `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json init-from-json --input -`
-     with a JSON document containing those fields. The script writes
-     `config.json` (chmod 600), backs up any pre-existing file as
-     `config.json.bak-<timestamp>`, and prints a masked summary.
-   - **In a terminal**: the user can run
-     `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json init`
-     for an interactive prompt (uses `getpass` for the secret).
-
-   Required fields:
-
-   - `feishu.app_id`
-   - `feishu.app_secret`
-   - `feishu.redirect_uri` (default `http://localhost:8765/feishu/oauth/callback`)
-   - `feishu.default_assignee_open_id` (optional; discovered from OAuth later)
-   - `broadcast.heartbeat_channel_id` — required; pick from
-     `ListBroadcastChannels`. The example config ships as `null` on purpose
-     so installation cannot silently fall back to a stranger's channel id.
-   - `broadcast.daily_summary_channel_id` — optional; defaults to
-     `heartbeat_channel_id`.
-   - Leave `paths.*` as `null` so the Skill manages `<SKILL_DIR>/state/` and
-     `<SKILL_DIR>/output/` itself.
-3. **Validate config and runtime**:
-   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json status`
-   shows the local view (config, paths, OAuth presence, cursor) without
-   touching Feishu APIs. It always masks `app_secret`.
-4. **OAuth bootstrap** (see `OAuth Bootstrap` below) once before the first
-   cron run, so `auth_checks.auth_mode_used` is `user` in heartbeats.
-5. **End-to-end health check**:
-   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json doctor`
-   hits all Feishu APIs the skill needs (task, im chat, im messages, drive,
-   docs-api search) under the user token, reports `missing_scopes`, and also
-   sanity-checks `cronjob.json` for stale `main-agent/tools/feishu-task-sync`
-   paths. Exit code 0 means “safe to start cron”.
-6. **First-run smoke test (required for “celebrate install success”)**:
-   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json first-run`.
-   The command
-   * re-uses `doctor` as a gate — refuses to start unless everything is green;
-   * runs `collect.py --since-last-success` against the user’s real Feishu
-     data so cursor / state / chat caches are populated for the first time;
-   * intentionally writes an **empty** Todo JSON to keep the install action
-     decoupled from real semantic Todo extraction — we never create real
-     Feishu Tasks during install;
-   * calls `feishu_tasks.py create --mark-success-cursor`, which advances
-     the cursor so the next scheduled cron will only look at fresh material;
-   * returns a `broadcast.suggested_message` string and the configured
-     `broadcast.heartbeat_channel_id`. The activating Kian agent **must**
-     take that string and post it to the broadcast channel via Kian’s
-     `broadcast` tool, so the user sees “✅ 首次安装成功” in Feishu within
-     seconds of finishing OAuth. `bootstrap.py` itself never POSTs the
-     webhook — broadcast plumbing stays in Kian, not the Skill.
-7. **Create a dedicated background agent** (recommended name: 飞书任务后台助手)
-   and bind both cron jobs to it via `targetAgentId`. Do **not** bind the
-   hourly heartbeat or the daily summary to the user's main dev chat agent –
-   it would flood the conversation.
-8. **Register cron jobs** in Kian's `cronjob.json` (5-field, minute-level)
-   using the hourly and daily prompts shipped with this Skill. Substitute
-   `{{SKILL_DIR}}` with the real absolute Skill path when writing the cron
-   `content`. `bootstrap.py` does **not** write to `cronjob.json`; that is the
-   agent's job because picking the target agent and the schedule must remain
-   under the user's control.
-
-## When to use
-
-Activate this Skill when the user wants any of:
-
-- "Kian, watch my Feishu and keep my Feishu Tasks in sync."
-- "Every hour: scan my Feishu chats/docs/wiki, extract real Todos, create
-  Feishu Tasks for me, but don't spam this chat."
-- "Send me a daily Feishu summary at 11:00 (todo digest + background run
-  stats)."
-- "Add a Feishu heartbeat to a broadcast channel so I can debug whether the
-  background sync is healthy."
-
-Do **not** activate this Skill purely to create a one-off Feishu Task; the
-Skill is designed around a recurring background loop, not ad-hoc creation.
-
-## Prerequisites
-
-Before the Skill can be useful for a new Kian user, the user must complete:
-
-1. **A Feishu self-built app** with the permissions listed in
-   `required_user_scopes` enabled **and published** on the Feishu developer
-   console. The Skill talks to Feishu as the authorized user via OAuth 2.0.
-2. **Redirect URI** registered on the Feishu developer console matching
-   `config.json.feishu.redirect_uri` (default
-   `http://localhost:8765/feishu/oauth/callback`).
-3. **A broadcast channel** wired to a Feishu robot (e.g. SmartZZ via webhook)
-   so the Skill can push heartbeat and daily summary cards. The channel id is
-   read from `config.json.broadcast.heartbeat_channel_id` /
-   `daily_summary_channel_id`.
-4. **Kian-side**:
-   - A dedicated background agent (commonly: 飞书任务后台助手). Bind both cron
-     jobs to it via `targetAgentId`.
-   - Two cron entries (one hourly, one daily at 11:00) whose `content` is
-     derived from `prompts/agent-hourly.md` and `prompts/daily-summary.md`
-     respectively, with `{{SKILL_DIR}}` already substituted.
-5. **Python >= 3.9** on the user's machine (the Skill uses `zoneinfo` from the
-   stdlib).
-
-## Configuration
-
-Copy `config.example.json` → `config.json` inside the Skill directory and
-fill it in. The example uses these defaults:
-
-```jsonc
-{
-  "schema_version": 1,
-  "feishu": {
-    "app_id": "cli_xxx",
-    "app_secret": "REPLACE_ME",
-    "redirect_uri": "http://localhost:8765/feishu/oauth/callback",
-    "default_assignee_open_id": null
-  },
-  "broadcast": {
-    "heartbeat_channel_id": null,
-    "daily_summary_channel_id": null
-  },
-  "paths": {
-    "workspace_root": null,
-    "agent_root": null,
-    "chat_root": null,
-    "docs_root": null,
-    "state_dir": null,
-    "output_dir": null,
-    "cron_log": null
-  },
-  "retention": {
-    "collected_days": 3,
-    "feishu_chat_cache_days": 3,
-    "state_success_days": 3,
-    "state_failed_days": 14
-  }
-}
-```
-
-Path semantics:
-
-- `paths.workspace_root` defaults to `~/KianWorkspace`.
-- `paths.agent_root` defaults to `<workspace_root>/.kian/main-agent`.
-- `paths.chat_root` / `paths.docs_root` default to `<agent_root>/chat` and
-  `<agent_root>/docs`. These are the user-side inputs the Skill reads.
-- `paths.state_dir` and `paths.output_dir` default to `<SKILL_DIR>/state` and
-  `<SKILL_DIR>/output`. This keeps all per-user runtime state inside the Skill
-  install so uninstalls and migrations are local.
-- Secrets and tokens (`app_secret`, `user_access_token`, `refresh_token`) are
-  never written to logs or heartbeats. Heartbeats may still include
-  `chat_id` / `open_id` / names / links by design – this is debug-friendly
-  output.
-
-## OAuth Bootstrap
-
-```bash
-python3 {{SKILL_DIR}}/scripts/feishu_user_auth.py --config {{SKILL_DIR}}/config.json auth-url \
-  --scope offline_access \
-  --scope im:chat:readonly \
-  --scope im:message:readonly \
-  --scope im:message.p2p_msg:get_as_user \
-  --scope im:message.group_msg:get_as_user \
-  --scope drive:drive:readonly \
-  --scope docx:document:readonly \
-  --scope wiki:wiki:readonly \
-  --scope search:docs:read \
-  --scope task:task:read \
-  --scope task:task:write
-```
-
-Open the printed URL in a browser, complete the authorization, copy the final
-callback URL (it starts with the configured `redirect_uri`), and feed it back
-to:
-
-```bash
-python3 {{SKILL_DIR}}/scripts/feishu_user_auth.py --config {{SKILL_DIR}}/config.json exchange --redirect-url '<URL>'
-```
-
-Verify with:
-
-```bash
-python3 {{SKILL_DIR}}/scripts/feishu_user_auth.py --config {{SKILL_DIR}}/config.json status
-python3 {{SKILL_DIR}}/scripts/feishu_user_auth.py --config {{SKILL_DIR}}/config.json test
-python3 {{SKILL_DIR}}/scripts/feishu_tasks.py --config {{SKILL_DIR}}/config.json auth-check
-```
-
-## Hourly run
-
-Driven by `prompts/agent-hourly.md`. In short:
-
-1. `python3 scripts/collect.py --config <config> --since-last-success` – cursor-based
-   collection from the last successful run, capped at 3 days. Uses the user
-   OAuth token by default (`--auth-mode auto`), falls back to tenant only when
-   the user token cannot be refreshed.
-2. The background agent reads `<output_dir>/collected/latest.json`, semantically
-   filters Todos (strictly using `metadata.mentions[].user_id == open_id` or
-   `metadata.mentioned_assignee == true` for "@me" decisions), and writes
-   `<output_dir>/todos/latest-todos.json`.
-3. `python3 scripts/feishu_tasks.py --config <config> create --input <todo json> --mark-success-cursor`
-   creates the new Feishu Tasks, attaches assignee and rich context to each,
-   and advances the cursor on success.
-4. The agent sends a heartbeat card to the broadcast channel using
-   `prompts/heartbeat.md`. Heartbeats fire **every hour, regardless of whether
-   anything was created**, so the user can watch for liveness.
-
-## Daily 11:00 summary
-
-Driven by `prompts/daily-summary.md`. The agent collates the day's actionable
-Todos *and* the background run stats (chats scanned, candidates, created /
-skipped / failed, current OAuth state, last_success_at, etc.) and broadcasts
-the result. It does **not** create new Feishu Tasks.
-
-## State & data layout
-
-All under `<SKILL_DIR>` by default (overridable in `config.json.paths.*`):
-
-- `state/user-auth.json` – OAuth tokens (never committed).
-- `state/state.json` – fingerprints of every previously created Todo for
-  dedup; rolling 3-day retention for successful records, 14 days for failed.
-- `state/sync-cursor.json` – `last_success_at`, run status, last finished.
-- `output/collected/latest.json` (+ timestamped copies for 3 days) – the
-  upstream snapshot Kian reads each hour.
-- `output/feishu-chat-cache/*.json` – raw per-run Feishu IM payloads,
-  3-day retention.
-- `output/latest-report.json` / `latest-report.md` – per-run create-side
-  report.
-- `output/cron.log` – append-only run log.
-
-All of the above are listed in the repo `.gitignore` so per-user data never
-leaks back into the Skill repository.
-
-## Migration from 0.1.x
-
-If you ran an earlier prototype that stored state under
-`<main-agent>/tools/feishu-task-sync/`, run the helper before the first 0.2.0
-cron tick:
-
-```bash
-# Dry-run first.
-python3 {{SKILL_DIR}}/scripts/migrate_0_2.py --config {{SKILL_DIR}}/config.json
-# Once happy with the plan:
-python3 {{SKILL_DIR}}/scripts/migrate_0_2.py --config {{SKILL_DIR}}/config.json --commit
-```
-
-The migration helper copies legacy `state/` and `output/` data into the
-Skill-owned layout. Existing destination files are renamed to
-`<file>.bak-<timestamp>` before being overwritten. Pause the legacy cron in
-`cronjob.json` (`status: paused`) before committing the move so no run lands
-mid-copy.
-
-## Privacy & sharing
-
-Heartbeats and the daily summary include unredacted Feishu identifiers
-(`chat_id`, `open_id`, names, links) on purpose – the maintainer asked for
-debug-friendly output. They are routed to the broadcast channel, **not** to
-the main dev chat. If you need a redacted variant in the future, do it inside
-the heartbeat template, not the underlying collector.
-
-Access tokens, refresh tokens, and `app_secret` must never appear in any
-broadcast, log, or commit.
-
-## Uninstall
-
-The Skill ships `scripts/bootstrap.py uninstall` for the parts the Skill
-itself owns. The activating Kian agent is responsible for the parts that
-live outside the Skill (cron, agent, Feishu OAuth grant).
-
-Walkthrough:
-
-1. **Remove the cron entries first.** In `cronjob.json`, delete both the
-   hourly and the daily entries whose `content` references this Skill. This
-   step is done by the Kian agent (or the user) directly; `bootstrap.py`
-   refuses to touch `cronjob.json`.
-2. **Run the uninstall command** to drop the per-install runtime data:
-
+1. **检查 Skill 安装路径**：在用户机器上找到 Skill 的真实绝对路径
+   `<SKILL_DIR>`（典型为 `~/KianWorkspace/.kian/skills/installed/feishu-task-sync/`
+   或 `~/Code/skills/skills/feishu-task-sync/`）。后续所有命令都要把
+   `{{SKILL_DIR}}` 替换成它。
+2. **列出广播渠道**：调用 Kian `ListBroadcastChannels`，让用户挑一个用作
+   心跳 / 摘要的广播渠道；建议同一个渠道做两用，除非用户明确要分开。
+3. **收集 4 个字段**（缺一不可，必须从用户那里要到，不可猜测）：
+   - 飞书 self-built app 的 `app_id`（`cli_xxx`）
+   - 同 app 的 `app_secret`
+   - OAuth `redirect_uri`（默认建议 `http://localhost:8765/feishu/oauth/callback`，
+     并提醒用户在飞书开放平台“安全设置 → 重定向 URL”里添加完全相同的值并
+     **创建版本并发布**）
+   - 上一步选好的 `broadcast.heartbeat_channel_id`
+4. **执行安装 Stage 1**：把字段拼成下面这种 JSON，喂给：
    ```bash
-   python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json uninstall --yes
+   python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --input -
    ```
+   ```json
+   {
+     "feishu": {
+       "app_id": "...",
+       "app_secret": "...",
+       "redirect_uri": "http://localhost:8765/feishu/oauth/callback"
+     },
+     "broadcast": {
+       "heartbeat_channel_id": "...",
+       "daily_summary_channel_id": null
+     }
+   }
+   ```
+   Agent 收到 stage=`awaiting_oauth_callback` 的 JSON 后，把 `auth_url`
+   贴给用户，并指引用户：
+   > 请在浏览器打开这个链接完成飞书授权；授权后浏览器会跳到
+   > `redirect_uri?code=...&state=...`（页面会显示无法访问，正常）。把
+   > **完整的回调 URL** 贴回来。
+5. **执行安装 Stage 2**：拿到用户回贴的回调 URL 后，运行：
+   ```bash
+   python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --resume --redirect-url '<完整回调 URL>'
+   ```
+   该命令会：换 token → `doctor` 全套健康检查 → `first-run`（跑一次真实
+   collect，强制空 Todo，推进 cursor）→ 渲染好两条 cron `content`。
+   Agent 收到 stage=`ready` 的 JSON 后：
+   - **首跑心跳**：把 `broadcast.suggested_message` 通过 Kian `broadcast`
+     工具发到 `broadcast.channel_id`。**这是用户得知“安装成功”的唯一信
+     号**，绝不能漏。
+   - **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台助手”
+     （或类似职责的 background-only Agent），用 `CreateAgent` 创建一个，
+     description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发对话”。
+     **严禁** 把 `targetAgentId` 设为用户的主开发 Agent。
+6. **写 cron**：把 stage=`ready` 返回的 `cron_entries` 直接写入 Kian
+   `cronjob.json`，把每条的 `targetAgentId` 填为上一步选定/创建的后台
+   Agent ID，保留 `status: "active"`。完成后通知用户：“cron 已生效，
+   下一个整点会自动跑。”
 
-   It deletes `<SKILL_DIR>/state/`, `<SKILL_DIR>/output/`, and
-   `<SKILL_DIR>/config.json`. It never calls Feishu APIs and never touches
-   `cronjob.json`.
-3. **Optionally delete the dedicated background agent** (飞书任务后台助手)
-   from Kian's agent list if you do not plan to reinstall the Skill.
-4. **Optionally revoke the Feishu app's authorization** for your user on
-   the Feishu developer console to fully de-authorize the OAuth grant.
-   `bootstrap.py uninstall` only erases the local token; it cannot revoke
-   server-side authorization on Feishu's end.
+## 已安装但 config 不存在的恢复路径
 
-## Known Limitations (0.2.0)
+某些场景下 `cronjob.json` 还在但 `<SKILL_DIR>/config.json` 被清掉了
+（例如调用过 `bootstrap.py uninstall` 但 cron 没删）。这时每小时 cron
+会失败。Agent 应当：
 
-- `scripts/bootstrap.py` lands in 0.2.1 (interactive + JSON-driven init,
-  local `status`, end-to-end `doctor`). It deliberately does **not** edit
-  `cronjob.json`; the activating Kian agent owns that step.
-- The cron log (`output/cron.log`) is append-only; planned: rotate at 50MB /
-  7 days.
-- `refresh_expires_at` is `None` in practice because Feishu does not return
-  it for this app type; heartbeats treat `refresh_token_valid=True` alone as
-  sufficient.
+1. 先用 `bootstrap.py status` 确认 config 缺失。
+2. 引导用户重新走上面的 6 步激活规则，从第 3 步收字段开始。
+3. 在重新执行 stage 2 之前，**先把 cronjob.json 中的两条 feishu 同步
+   条目临时 `status: paused`**，避免在恢复中途又跑挂。
 
-## Changelog
+## 日常运行（cron 真实指令）
 
-See `CHANGELOG.md`.
+Stage 2 渲染出来的两条 cron `content` 已经包含了完整的运行指令：每小时
+方案 B 同步 + 每日 11:00 摘要。它们对应模板：
+- `<SKILL_DIR>/prompts/agent-hourly.md`
+- `<SKILL_DIR>/prompts/daily-summary.md`
+
+修改这些行为时**改模板文件 + bump SKILL.md `version`**，不要直接改用户
+机器上 `cronjob.json` 里的字面 content；重新运行 install/重新渲染才是
+正确的升级路径。
+
+心跳卡片格式遵循 `<SKILL_DIR>/prompts/heartbeat.md`。所有日常运行中，
+Agent 在非异常情况下必须保持以下静默原则：
+- 无新 Todo / 创建成功：完全静默，不进入主对话。
+- 失败 / OAuth 过期且刷新失败 / 缺 scope / 接口异常：才在主对话简要报告。
+
+## @我判断规则（不可放松）
+
+判定一条飞书消息是否 @ 用户本人，必须基于结构化字段：
+- `metadata.mentions[].user_id == 用户 open_id`，或
+- `metadata.mentioned_assignee == true`。
+
+文本里的 `@_user_N` / `@某中文名` **不算证据**。证据不足时只写日志/摘要，
+不创建任务。
+
+## 卸载
+
+参见 `README.md` 中“卸载”一节。Agent 责任：
+
+1. 把 `cronjob.json` 中两条飞书同步条目删除（不只是 paused），确保 cron
+   调度器不会再尝试运行已删除的脚本/数据。
+2. 询问用户是否需要删除专用后台 Agent；按用户选择执行 `DeleteAgent`
+   或保留。
+3. 调用 `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json uninstall --yes`
+   删除 `<SKILL_DIR>` 下的 `config.json` / `state/` / `output/`。
+4. 提醒用户去飞书账户的“我的授权”页面撤销该 self-built app 的 OAuth 授权
+   （Agent 无法替用户撤销）。
+
+## 关键事实
+
+- 所有运行时数据都在 `<SKILL_DIR>` 下：`config.json` / `state/` /
+  `output/`。**绝对不要**再读写 main-agent 工作区下的旧 `tools/feishu-task-sync`
+  路径。
+- 所有路径、Channel id、scope 列表都可以从 `<SKILL_DIR>/config.json` 与
+  `runtime.py` 派生；Agent 不要在对话里硬编码它们。
+- 心跳与摘要内容里允许出现 `chat_id` / `open_id` / 名称 / 链接（用户偏好
+  debug-friendly 输出），但 **`app_secret` / `access_token` / `refresh_token`
+  原文必须永远 mask 或不输出**。
+
+## CHANGELOG
+
+见 `CHANGELOG.md`。

@@ -297,7 +297,7 @@ def _load_json_input(source: str) -> Dict[str, Any]:
     return json.load(open(os.path.expanduser(source), "r", encoding="utf-8"))
 
 
-def _command_init(args: argparse.Namespace, *, payload: Optional[Dict[str, Any]] = None) -> int:
+def _command_init(args: argparse.Namespace, *, payload: Optional[Dict[str, Any]] = None, emit: bool = True) -> int:
     target = _resolve_config_path(args.config)
     if target.exists() and not args.force:
         print(
@@ -373,7 +373,8 @@ def _command_init(args: argparse.Namespace, *, payload: Optional[Dict[str, Any]]
         "  3) python3 scripts/bootstrap.py --config "
         f"{target} doctor",
     ]
-    _emit(summary, args.print_json, fallback)
+    if emit:
+        _emit(summary, args.print_json, fallback)
     return 0
 
 
@@ -1062,6 +1063,246 @@ def _command_uninstall(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# install (two-stage agent-driven flow)
+# ---------------------------------------------------------------------------
+
+
+def _agent_hourly_cron_content(settings: Any) -> str:
+    """Render the hourly agent prompt with concrete absolute paths.
+
+    Skill ships ``prompts/agent-hourly.md`` containing ``{{SKILL_DIR}}`` and
+    ``{{HEARTBEAT_CHANNEL_ID}}`` placeholders. We substitute them with the
+    installed Skill's absolute path and the configured broadcast channel so
+    the Kian agent can drop the result straight into ``cronjob.json.content``.
+    """
+
+    template_path = SKILL_DIR / "prompts" / "agent-hourly.md"
+    try:
+        text = template_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RuntimeError(f"missing prompt template: {template_path}")
+    return (
+        text
+        .replace("{{SKILL_DIR}}", str(SKILL_DIR))
+        .replace("{{HEARTBEAT_CHANNEL_ID}}", str(settings.broadcast.heartbeat_channel_id or ""))
+        .replace("{{DAILY_SUMMARY_CHANNEL_ID}}", str(settings.broadcast.daily_summary_channel_id or settings.broadcast.heartbeat_channel_id or ""))
+    )
+
+
+def _daily_summary_cron_content(settings: Any) -> str:
+    template_path = SKILL_DIR / "prompts" / "daily-summary.md"
+    try:
+        text = template_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RuntimeError(f"missing prompt template: {template_path}")
+    return (
+        text
+        .replace("{{SKILL_DIR}}", str(SKILL_DIR))
+        .replace("{{HEARTBEAT_CHANNEL_ID}}", str(settings.broadcast.heartbeat_channel_id or ""))
+        .replace("{{DAILY_SUMMARY_CHANNEL_ID}}", str(settings.broadcast.daily_summary_channel_id or settings.broadcast.heartbeat_channel_id or ""))
+    )
+
+
+def _default_install_scopes() -> List[str]:
+    return [
+        "offline_access",
+        "im:chat:readonly",
+        "im:message:readonly",
+        "im:message.p2p_msg:get_as_user",
+        "im:message.group_msg:get_as_user",
+        "drive:drive:readonly",
+        "docx:document:readonly",
+        "wiki:wiki:readonly",
+        "search:docs:read",
+        "task:task:read",
+        "task:task:write",
+    ]
+
+
+def _command_install(args: argparse.Namespace) -> int:
+    """Two-stage agent-friendly installer.
+
+    Stage 1 (``--input``): write ``config.json`` and return an OAuth URL.
+    Stage 2 (``--resume --redirect-url`` or ``--code``):
+        exchange OAuth code, run doctor, run first-run, return ready-to-use
+        cron entries and a heartbeat payload for the agent to act on.
+    """
+
+    import subprocess
+    from feishu_user_auth import FeishuUserAuth
+
+    if args.resume:
+        # Stage 2.
+        try:
+            settings = load_settings(args.config)
+        except ConfigError as exc:
+            print(f"[bootstrap] {exc}", file=sys.stderr)
+            return 2
+        if not (args.redirect_url or args.code):
+            print("[bootstrap] install --resume requires --redirect-url or --code.", file=sys.stderr)
+            return 2
+
+        # Step A: exchange code.
+        auth = FeishuUserAuth(settings)
+        try:
+            if args.code:
+                auth.exchange_code(args.code)
+            else:
+                from feishu_user_auth import extract_code
+
+                auth.exchange_code(extract_code(args.redirect_url))
+        except Exception as exc:
+            payload = getattr(exc, "payload", None)
+            result = {
+                "ok": False,
+                "stage": "exchange",
+                "error": str(exc),
+                "response": payload,
+            }
+            _emit(result, args.print_json, [f"OAuth exchange 失败：{exc}"])
+            return 2
+
+        # Step B: doctor.
+        doctor_argv = argparse.Namespace(config=args.config, print_json=True)
+        import io
+        import contextlib
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            doctor_rc = _command_doctor(doctor_argv)
+        try:
+            doctor_payload = json.loads(buffer.getvalue() or "{}")
+        except json.JSONDecodeError:
+            doctor_payload = {"ok": False, "raw": buffer.getvalue()}
+        if doctor_rc != 0:
+            reasons = _doctor_blocking_failures(doctor_payload) or ["doctor 返回非零退出码"]
+            result = {
+                "ok": False,
+                "stage": "doctor",
+                "doctor": doctor_payload,
+                "blocking_reasons": reasons,
+            }
+            _emit(result, args.print_json, ["install 被拒绝，doctor 未通过："] + [f"  - {r}" for r in reasons])
+            return 2
+
+        # Step C: first-run.
+        first_run_argv = argparse.Namespace(config=args.config, print_json=True)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            first_run_rc = _command_first_run(first_run_argv)
+        try:
+            first_run_payload = json.loads(buffer.getvalue() or "{}")
+        except json.JSONDecodeError:
+            first_run_payload = {"ok": False, "raw": buffer.getvalue()}
+        if first_run_rc != 0:
+            result = {
+                "ok": False,
+                "stage": "first_run",
+                "first_run": first_run_payload,
+            }
+            _emit(result, args.print_json, ["install 中 first-run 失败。详情见 first_run 字段。"])
+            return 2
+
+        # Step D: render cron entries.
+        try:
+            hourly_content = _agent_hourly_cron_content(settings)
+            daily_content = _daily_summary_cron_content(settings)
+        except RuntimeError as exc:
+            result = {
+                "ok": False,
+                "stage": "render_cron",
+                "error": str(exc),
+            }
+            _emit(result, args.print_json, [f"渲染 cron 模板失败：{exc}"])
+            return 2
+
+        cron_entries = [
+            {
+                "cron": "0 * * * *",
+                "content": hourly_content,
+                "status": "active",
+                "targetAgentId": None,  # The activating Kian agent fills this in.
+            },
+            {
+                "cron": "0 11 * * *",
+                "content": daily_content,
+                "status": "active",
+                "targetAgentId": None,
+            },
+        ]
+
+        result = {
+            "ok": True,
+            "stage": "ready",
+            "config_path": str(settings.config_path),
+            "first_run": first_run_payload,
+            "broadcast": first_run_payload.get("broadcast"),
+            "cron_entries": cron_entries,
+            "next_steps": [
+                "使用 Kian 的 broadcast 工具将 broadcast.suggested_message 发送到 broadcast.channel_id。",
+                "检查是否存在专用后台 agent（推荐名称：飞书任务后台助手）；不存在则 CreateAgent 创建一个。严禁将 cron 绑定主开发 Agent。",
+                "将 cron_entries 写入 cronjob.json，并把各条的 targetAgentId 设为上一步选中/创建的后台 agent ID。",
+            ],
+        }
+        fallback = [
+            "install 完成。",
+            "请依次完成下列动作：",
+            "  1. 按 next_steps 依次：发心跳 + 创建/复用后台 agent + 写入两条 cron。",
+        ]
+        _emit(result, args.print_json, fallback)
+        return 0
+
+    # Stage 1.
+    if not args.input:
+        print("[bootstrap] install (stage 1) requires --input <path|-> with the config JSON.", file=sys.stderr)
+        return 2
+    payload = _load_json_input(args.input)
+
+    init_namespace = argparse.Namespace(
+        config=args.config,
+        print_json=args.print_json,
+        input=None,
+        force=args.force,
+    )
+    init_rc = _command_init(init_namespace, payload=payload, emit=False)
+    if init_rc != 0:
+        return init_rc
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] config written but failed to load: {exc}", file=sys.stderr)
+        return 2
+
+    scopes = _default_install_scopes()
+    auth = FeishuUserAuth(settings, scopes=scopes)
+    auth_url = auth.build_auth_url()
+
+    result = {
+        "ok": True,
+        "stage": "awaiting_oauth_callback",
+        "config_path": str(settings.config_path),
+        "auth_url": auth_url,
+        "redirect_uri": settings.feishu.redirect_uri,
+        "scopes": scopes,
+        "next_step": (
+            "请用户在浏览器打开 auth_url 完成授权，然后把浏览器跳转后的完整 URL "
+            "（正常是以 redirect_uri 开头，后面带 code/state）传回。使用命令："
+            f"python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} install --resume --redirect-url '<回调 URL>'"
+        ),
+    }
+    fallback = [
+        "阶段 1 完成：config 已写入，OAuth 链接如下。",
+        f"auth_url     : {auth_url}",
+        f"redirect_uri : {settings.feishu.redirect_uri}",
+        "",
+        "下一步：请用户授权完成后，调用 install --resume --redirect-url '<回调 URL>'。",
+    ]
+    _emit(result, args.print_json, fallback)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
 
@@ -1099,6 +1340,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Remove the per-install state/output/config for this skill. Does NOT touch cronjob.json or Feishu authorisation.",
     )
     p_uninst.add_argument("--yes", action="store_true", help="Skip the interactive confirmation step.")
+
+    p_install = sub.add_parser(
+        "install",
+        help="One-shot two-stage installer for Kian agents. Stage 1 writes config + emits an OAuth URL; stage 2 exchanges the callback and runs doctor + first-run + cron rendering.",
+    )
+    p_install.add_argument("--input", default=None, help="Stage 1 only: JSON file with feishu/broadcast fields. Use '-' for stdin.")
+    p_install.add_argument("--force", action="store_true", help="Stage 1 only: overwrite an existing config.json (with timestamped backup).")
+    p_install.add_argument("--resume", action="store_true", help="Stage 2: continue installation after OAuth.")
+    p_install.add_argument("--redirect-url", default=None, help="Stage 2: the full callback URL the browser landed on after authorising.")
+    p_install.add_argument("--code", default=None, help="Stage 2: raw authorisation code instead of the full callback URL.")
     return parser.parse_args(argv)
 
 
@@ -1120,6 +1371,8 @@ def main(argv: Sequence[str]) -> int:
         return _command_first_run(args)
     if args.command == "uninstall":
         return _command_uninstall(args)
+    if args.command == "install":
+        return _command_install(args)
     raise SystemExit(f"unknown command: {args.command}")
 
 

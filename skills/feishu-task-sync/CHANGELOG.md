@@ -3,7 +3,41 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.2.2 – install-time smoke test + uninstall (in development)
+## 0.2.3 – one-shot installer + Chinese SKILL.md + user-facing README (in development)
+
+- `scripts/bootstrap.py install`: new two-stage agent-friendly installer.
+  * Stage 1 (`--input -`): writes config.json (via `init-from-json`) and
+    emits the OAuth `auth_url` plus the configured `redirect_uri` and the
+    default scope list.
+  * Stage 2 (`--resume --redirect-url <URL>` or `--code <CODE>`): exchanges
+    the OAuth code, runs `doctor`, runs `first-run`, renders the hourly /
+    daily prompts into concrete `cron_entries` (with `{{SKILL_DIR}}` and
+    `{{HEARTBEAT_CHANNEL_ID}}` substituted), and returns the heartbeat
+    payload the Kian agent should broadcast.
+  * Effect: an activating Kian agent only needs two interactions with the
+    user (collect fields + paste callback URL) to take the install all the
+    way from no config to live cron + visible “✅ 首次安装成功” heartbeat.
+- `SKILL.md` rewritten in Chinese and made Agent-only. It now:
+  * declares `trigger_phrases` (“开始” / “初始化” / “启用 feishu-task-sync” /
+    “install feishu-task-sync” / “安装飞书同步”) so the agent does not need
+    the user to invent a phrase;
+  * encodes the 6-step activation flow that maps onto `bootstrap.py install`
+    (stage 1 → OAuth handoff → stage 2 → broadcast → create background agent
+    → write cron);
+  * forbids binding cron to the user's main dev agent;
+  * documents the recovery path when `config.json` is gone but cron still
+    exists.
+- New `skills/feishu-task-sync/README.md`: user-facing install guide.
+  Covers prerequisites (Feishu self-built app, redirect URL, user-identity
+  scopes, broadcast channel, Python ≥3.9), the two-message install flow in
+  Kian, what to expect at each step, common errors / fixes, upgrade and
+  uninstall procedures, and privacy notes. Keeps SKILL.md focused on the
+  agent.
+- Repo-root `README.md` now carries an “Available Skills” index pointing at
+  the per-skill README + SKILL.md, so consumers landing on the repo can
+  navigate without guessing.
+
+## 0.2.2 – install-time smoke test + uninstall
 
 - New `scripts/bootstrap.py first-run`:
   * Re-uses `doctor` as a gate, refusing to run when health checks fail.

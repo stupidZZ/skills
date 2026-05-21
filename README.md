@@ -9,6 +9,12 @@ The repository layout intentionally mirrors
 [`anthropics/skills`](https://github.com/anthropics/skills) so the same
 conventions and tooling can be reused.
 
+## Available Skills
+
+| Skill | Version | One-liner | Docs |
+| --- | --- | --- | --- |
+| [`feishu-task-sync`](skills/feishu-task-sync/) | 0.2.3 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
+
 ## Layout
 
 ```
