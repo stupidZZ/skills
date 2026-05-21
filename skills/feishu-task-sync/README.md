@@ -58,16 +58,30 @@ http://localhost:8765/feishu/oauth/callback
 
 > ⚠️ 添加完一定要点页面顶部的“创建版本”按钮发布，否则配置不会生效。
 
-### 1.3 用户身份 scope
+### 1.3 用户身份 scope（推荐一次性批量导入）
 
-继续在“应用 → 权限管理 → 用户身份权限”里启用并发布：
+本 Skill 一共需要 11 项用户身份 scope。手动一项项勾很容易遗漏，建议直
+接用仓库里预置的批量导入文件：
+[`permissions/required-scopes.json`](./permissions/required-scopes.json)
+。
 
-- `task:task:read`、`task:task:write`
-- `im:chat:readonly`、`im:message:readonly`
-- `im:message.p2p_msg:get_as_user`、`im:message.group_msg:get_as_user`
-- `drive:drive:readonly`、`docx:document:readonly`
-- `wiki:wiki:readonly`、`search:docs:read`
-- `offline_access`（拿 refresh_token，必须）
+操作步骤：
+
+1. 打开 [飞书开放平台](https://open.feishu.cn/app)，进入对应自建应用。
+2. 左侧导航选“权限管理”。
+3. 页面右上角点 **“批量编辑 / 批量导入”** 按钮。
+4. 将 `permissions/required-scopes.json` 的全部内容粘贴进去。
+5. 点“确定 / 导入”，11 个权限会一次性加入申请列表。
+6. 页面顶部会提示“版本发布后，当前修改方可生效”。**请点“创建版本”
+   并发布**。在企业内部被加为协作者的开发者账号上，未发布也可能临时
+   生效；但 **发布才是唯一可靠的授权路径**。不发布就走 OAuth，后面你
+   会看到 `doctor` 或心跳中出现 `missing_scopes`。
+
+JSON 表头里的 `scopes.tenant` 今天保持为空数组：本 Skill 只走用户身份
+OAuth，不需要任何“应用身份” scope。以后如果 Skill 增加了应用身份能力，
+该数组会随 `permissions/required-scopes.json` 一起更新，你重新批量导入即可。
+
+详细说明见 [`permissions/README.md`](./permissions/README.md)。
 
 ### 1.4 飞书广播渠道（用于发心跳和日报）
 
@@ -185,7 +199,7 @@ python3 ~/KianWorkspace/.kian/skills/installed/feishu-task-sync/scripts/bootstra
 | 错误 | 解决方式 |
 | --- | --- |
 | `重定向 URL 有误（错误码 20029）` | 飞书后台“安全设置 → 重定向 URL”里没有你正在用的 `redirect_uri`，或新增完没点“创建版本”发布。 |
-| `xxx scope 有误（错误码 20043）` | 飞书后台的“权限管理 → 用户身份权限”里没启用对应 scope，或没发布版本。按报错信息列的 scope 名去开通。 |
+| `xxx scope 有误（错误码 20043）` 或 doctor `missing_scopes` 非空 | 飞书后台的“权限管理 → 用户身份权限”里没启用对应 scope。去 [`permissions/required-scopes.json`](./permissions/required-scopes.json) 里照抑导入一次并点“创建版本”发布。 |
 | 授权后浏览器“无法访问 localhost” | **不是问题**。我们不需要真的访问 localhost，只需要浏览器地址栏里的完整 URL。复制整条粘给 Kian 即可。 |
 
 ### 4.2 心跳卡片没收到

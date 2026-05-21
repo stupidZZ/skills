@@ -3,13 +3,14 @@ name: feishu-task-sync
 description: |
   飞书 Todo 后台同步 Skill。安装后用户在 Kian 对话里说"开始" / "初始化"
   / "启用 feishu-task-sync" / "install feishu-task-sync" 等触发短语，
-  Agent 必须立刻按本 SKILL.md 顶部的"激活规则"驱动完整安装流程：收
-  config 字段 → 调 bootstrap.py install 走 OAuth → 自动 first-run 心跳
-  → 写 cron 并绑定专用后台 Agent。日常运行时本 Skill 每小时让 Agent 自
-  己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义提炼 Todo，调用
-  feishu_tasks.py 创建飞书任务并加用户为 assignee；同时每小时心跳 +
-  每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.2.3
+  Agent 必须立刻按本 SKILL.md 顶部的"激活规则"驱动完整安装流程：先让
+  用户用 permissions/required-scopes.json 批量导入飞书后台权限并发布
+  版本 → 收 config 字段 → 调 bootstrap.py install 走 OAuth → 自动
+  first-run 心跳 → 写 cron 并绑定专用后台 Agent。日常运行时本 Skill
+  每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
+  提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
+  同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
+version: 0.2.4
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -53,22 +54,37 @@ trigger_phrases:
 - 用户提到 “装好这个 Skill 但不知道怎么开始 / 怎么用”。
 - Agent 加载到本 Skill 且检测到 `<SKILL_DIR>/config.json` 不存在。
 
-引导式安装一共走 6 步，Agent 必须按顺序执行：
+引导式安装一共走 7 步，Agent 必须按顺序执行：
 
 1. **检查 Skill 安装路径**：在用户机器上找到 Skill 的真实绝对路径
    `<SKILL_DIR>`（典型为 `~/KianWorkspace/.kian/skills/installed/feishu-task-sync/`
    或 `~/Code/skills/skills/feishu-task-sync/`）。后续所有命令都要把
    `{{SKILL_DIR}}` 替换成它。
-2. **列出广播渠道**：调用 Kian `ListBroadcastChannels`，让用户挑一个用作
-   心跳 / 摘要的广播渠道；建议同一个渠道做两用，除非用户明确要分开。
-3. **收集 4 个字段**（缺一不可，必须从用户那里要到，不可猜测）：
+
+2. **推动用户在飞书后台一次性导入权限**：读取
+   `{{SKILL_DIR}}/permissions/required-scopes.json`，把完整 JSON 贴给
+   用户，并指引：
+   - 路径：飞书开放平台 → 应用 → 权限管理 → 右上角“批量编辑 / 批量导入”
+     → 粘贴 JSON → 确定 / 导入。11 个用户身份 scope 一次到位。
+   - 同一页面的“安全设置 → 重定向 URL”里加上
+     `http://localhost:8765/feishu/oauth/callback`（或用户自定义的
+     `redirect_uri`）。
+   - 最后一定要点页面顶部的 **“创建版本并发布”**。本 Skill 始终假设需要
+     发布；未发布的情况下偶尔能给开发者本人临时生效，但其他人或新会话
+     都拿不到 scope，doctor / install 会立刻报 `missing_scopes`。
+   - **严禁让用户手动一项项在 UI 里勾**。
+
+3. **列出广播渠道**：调用 Kian `ListBroadcastChannels`，让用户挑一个
+   用作心跳 / 摘要的广播渠道；建议同一个渠道做两用，除非用户明确要
+   分开。
+
+4. **收集 4 个字段**（缺一不可，必须从用户那里要到，不可猜测）：
    - 飞书 self-built app 的 `app_id`（`cli_xxx`）
    - 同 app 的 `app_secret`
-   - OAuth `redirect_uri`（默认建议 `http://localhost:8765/feishu/oauth/callback`，
-     并提醒用户在飞书开放平台“安全设置 → 重定向 URL”里添加完全相同的值并
-     **创建版本并发布**）
+   - OAuth `redirect_uri`（与第 2 步填入飞书后台的值完全一致）
    - 上一步选好的 `broadcast.heartbeat_channel_id`
-4. **执行安装 Stage 1**：把字段拼成下面这种 JSON，喂给：
+
+5. **执行安装 Stage 1**：把字段拼成下面这种 JSON，喂给：
    ```bash
    python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --input -
    ```
@@ -90,21 +106,27 @@ trigger_phrases:
    > 请在浏览器打开这个链接完成飞书授权；授权后浏览器会跳到
    > `redirect_uri?code=...&state=...`（页面会显示无法访问，正常）。把
    > **完整的回调 URL** 贴回来。
-5. **执行安装 Stage 2**：拿到用户回贴的回调 URL 后，运行：
+
+6. **执行安装 Stage 2**：拿到用户回贴的回调 URL 后，运行：
    ```bash
    python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --resume --redirect-url '<完整回调 URL>'
    ```
    该命令会：换 token → `doctor` 全套健康检查 → `first-run`（跑一次真实
    collect，强制空 Todo，推进 cursor）→ 渲染好两条 cron `content`。
+   **如果返回的 JSON 里出现非空 `missing_scopes`**，立刻提示用户：“你
+   的飞书应用还有权限未发布。请重新打开权限管理页点‘创建版本并发布’
+   后说 ‘重试’。”并在用户说“重试”时重新执行同一条命令。
+
    Agent 收到 stage=`ready` 的 JSON 后：
    - **首跑心跳**：把 `broadcast.suggested_message` 通过 Kian `broadcast`
-     工具发到 `broadcast.channel_id`。**这是用户得知“安装成功”的唯一信
-     号**，绝不能漏。
-   - **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台助手”
-     （或类似职责的 background-only Agent），用 `CreateAgent` 创建一个，
-     description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发对话”。
-     **严禁** 把 `targetAgentId` 设为用户的主开发 Agent。
-6. **写 cron**：把 stage=`ready` 返回的 `cron_entries` 直接写入 Kian
+     工具发到 `broadcast.channel_id`。**这是用户得知“安装成功”的唯一
+     信号**，绝不能漏。
+   - **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台
+     助手”（或类似职责的 background-only Agent），用 `CreateAgent` 创建
+     一个，description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发
+     对话”。**严禁** 把 `targetAgentId` 设为用户的主开发 Agent。
+
+7. **写 cron**：把 stage=`ready` 返回的 `cron_entries` 直接写入 Kian
    `cronjob.json`，把每条的 `targetAgentId` 填为上一步选定/创建的后台
    Agent ID，保留 `status: "active"`。完成后通知用户：“cron 已生效，
    下一个整点会自动跑。”
@@ -116,7 +138,9 @@ trigger_phrases:
 会失败。Agent 应当：
 
 1. 先用 `bootstrap.py status` 确认 config 缺失。
-2. 引导用户重新走上面的 6 步激活规则，从第 3 步收字段开始。
+2. 引导用户重新走上面的 7 步激活规则。若用户确认飞书侧没有变（权限 +
+   redirect URL 仍在发布状态），可以从第 3 步“列广播渠道”继续；否则
+   仍从第 2 步“权限批量导入并发布”重新开始。
 3. 在重新执行 stage 2 之前，**先把 cronjob.json 中的两条 feishu 同步
    条目临时 `status: paused`**，避免在恢复中途又跑挂。
 
@@ -155,19 +179,20 @@ Agent 在非异常情况下必须保持以下静默原则：
    或保留。
 3. 调用 `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json uninstall --yes`
    删除 `<SKILL_DIR>` 下的 `config.json` / `state/` / `output/`。
-4. 提醒用户去飞书账户的“我的授权”页面撤销该 self-built app 的 OAuth 授权
-   （Agent 无法替用户撤销）。
+4. 提醒用户去飞书账户的“我的授权”页面撤销该 self-built app 的 OAuth
+   授权（Agent 无法替用户撤销）。
 
 ## 关键事实
 
 - 所有运行时数据都在 `<SKILL_DIR>` 下：`config.json` / `state/` /
-  `output/`。**绝对不要**再读写 main-agent 工作区下的旧 `tools/feishu-task-sync`
-  路径。
-- 所有路径、Channel id、scope 列表都可以从 `<SKILL_DIR>/config.json` 与
-  `runtime.py` 派生；Agent 不要在对话里硬编码它们。
-- 心跳与摘要内容里允许出现 `chat_id` / `open_id` / 名称 / 链接（用户偏好
-  debug-friendly 输出），但 **`app_secret` / `access_token` / `refresh_token`
-  原文必须永远 mask 或不输出**。
+  `output/`。**绝对不要**再读写 main-agent 工作区下的旧
+  `tools/feishu-task-sync` 路径。
+- 所有路径、Channel id、scope 列表都可以从 `<SKILL_DIR>/config.json`
+  与 `permissions/required-scopes.json` 派生；Agent 不要在对话里硬编码
+  它们。
+- 心跳与摘要内容里允许出现 `chat_id` / `open_id` / 名称 / 链接（用户
+  偏好 debug-friendly 输出），但 **`app_secret` / `access_token` /
+  `refresh_token` 原文必须永远 mask 或不输出**。
 
 ## CHANGELOG
 

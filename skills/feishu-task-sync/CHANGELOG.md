@@ -3,7 +3,27 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.2.3 – one-shot installer + Chinese SKILL.md + user-facing README (in development)
+## 0.2.4 – batch-import permission manifest (in development)
+
+- New `permissions/required-scopes.json`: Feishu open platform batch-import
+  payload listing all 11 user-identity scopes (and an empty `tenant` array
+  reserved for future application-identity needs). Pasted as-is into the
+  Feishu developer console it adds every scope this Skill needs in one
+  shot.
+- New `permissions/README.md` documenting the import flow plus the
+  expectation that a new version is published before scopes go live for
+  arbitrary users.
+- SKILL.md frontmatter bumped to 0.2.4. Activation rules grow to seven
+  steps; the install flow now leads with "paste
+  `permissions/required-scopes.json` into Feishu → Batch Import → create
+  version & publish" before asking the user for the four config fields.
+  Recovery path notes that a re-import is only necessary when Feishu side
+  has actually changed.
+- README.md install guide rewrites section 1.3 to point at the JSON
+  manifest as the recommended path; the FAQ row for `missing_scopes` now
+  points at the manifest plus "create version & publish" reminder.
+
+## 0.2.3 – one-shot installer + Chinese SKILL.md + user-facing README
 
 - `scripts/bootstrap.py install`: new two-stage agent-friendly installer.
   * Stage 1 (`--input -`): writes config.json (via `init-from-json`) and
