@@ -14,7 +14,9 @@ skills/*/state/
 skills/*/output/
 skills/*/cache/
 skills/*/.env
+skills/*/config.json
 skills/*/config.local.json
+skills/*/config.json.bak-*
 
 # OAuth / Feishu secrets that may leak through copy-paste mistakes.
 **/user-auth.json

@@ -640,7 +640,21 @@ def _doctor_cron_state() -> Dict[str, Any]:
                         "uses_skill_dir": "skills/feishu-task-sync" in content
                         or "{{SKILL_DIR}}" in content
                         or "Code/skills" in content,
-                        "uses_legacy_main_agent": "main-agent/tools/feishu-task-sync" in content,
+                        # Only treat the legacy layout as 'used' when an actual
+                        # command references it; explanatory text that merely
+                        # mentions the old path (e.g. 'do not use main-agent/...')
+                        # would otherwise produce spurious warnings.
+                        "uses_legacy_main_agent": any(
+                            marker in content
+                            for marker in (
+                                "main-agent/tools/feishu-task-sync/collect.py",
+                                "main-agent/tools/feishu-task-sync/feishu_tasks.py",
+                                "main-agent/tools/feishu-task-sync/feishu_user_auth.py",
+                                "main-agent/tools/feishu-task-sync/sync_feishu_tasks.py",
+                                "main-agent/tools/feishu-task-sync/output",
+                                "main-agent/tools/feishu-task-sync/state",
+                            )
+                        ),
                     }
                 )
         return {
