@@ -412,6 +412,42 @@ def _read_user_auth(state_path: Path) -> Dict[str, Any]:
     }
 
 
+def _read_im_bad_chats(state_dir: Path) -> Dict[str, Any]:
+    path = state_dir / "im-bad-chats.json"
+    if not path.exists():
+        return {"exists": False, "count": 0, "samples": []}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as exc:
+        return {"exists": True, "readable": False, "error": str(exc)}
+    chats = data.get("chats") or {}
+    items: List[Dict[str, Any]] = []
+    for chat_id, record in chats.items():
+        if not isinstance(record, dict):
+            continue
+        items.append(
+            {
+                "chat_id": chat_id,
+                "failures": record.get("failures"),
+                "code": record.get("code"),
+                "msg": record.get("msg"),
+                "manual_override": record.get("manual_override"),
+                "first_seen_at": record.get("first_seen_at"),
+                "last_seen_at": record.get("last_seen_at"),
+            }
+        )
+    items.sort(key=lambda x: (x.get("last_seen_at") or ""), reverse=True)
+    return {
+        "exists": True,
+        "readable": True,
+        "path": str(path),
+        "count": len(items),
+        "updated_at": data.get("updated_at"),
+        "samples": items[:10],
+    }
+
+
 def _read_sync_cursor(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {"exists": False}
@@ -464,6 +500,7 @@ def _command_status(args: argparse.Namespace) -> int:
         },
         "user_auth": _read_user_auth(paths.user_auth_path),
         "cursor": _read_sync_cursor(paths.sync_cursor_path),
+        "im_bad_chats": _read_im_bad_chats(paths.state_dir),
     }
     fallback = [
         f"config         : {payload['config_path']} (source={payload['config_source']})",
@@ -477,6 +514,7 @@ def _command_status(args: argparse.Namespace) -> int:
         f"output_dir     : {payload['paths']['output_dir']} writable={payload['paths']['output_dir_writable']}",
         f"user_auth      : {json.dumps(payload['user_auth'], ensure_ascii=False)}",
         f"cursor         : {json.dumps(payload['cursor'], ensure_ascii=False)}",
+        f"im_bad_chats   : count={payload['im_bad_chats'].get('count', 0)} updated_at={payload['im_bad_chats'].get('updated_at')}",
     ]
     _emit(payload, args.print_json, fallback)
     return 0
@@ -705,6 +743,8 @@ def _command_doctor(args: argparse.Namespace) -> int:
         and feishu_section.get("ok")
     )
 
+    im_bad_chats = _read_im_bad_chats(settings.paths.state_dir)
+
     payload = {
         "ok": bool(overall_ok),
         "config_path": str(settings.config_path),
@@ -717,6 +757,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
         "cronjob": cron,
         "missing_scopes": missing_scopes,
         "required_user_scopes": REQUIRED_USER_SCOPES,
+        "im_bad_chats": im_bad_chats,
     }
 
     suggestions: List[str] = []
@@ -825,6 +866,52 @@ def _broadcast_first_run_heartbeat(settings: Any, summary: Dict[str, Any]) -> Di
     }
 
 
+def _backfill_default_assignee(settings: Any) -> Dict[str, Any]:
+    """Ensure ``config.json.feishu.default_assignee_open_id`` is populated.
+
+    If it is already set, do nothing. Otherwise call /authen/v1/user_info
+    with the current user_access_token and write the resulting ``open_id``
+    back into config.json, preserving every other field. Failures return a
+    diagnostic dict but never raise -- backfill is best-effort.
+    """
+
+    if settings.feishu.default_assignee_open_id:
+        return {
+            "performed": False,
+            "reason": "default_assignee_open_id already set in config.json",
+            "open_id": settings.feishu.default_assignee_open_id,
+        }
+    try:
+        from feishu_user_auth import FeishuUserAuth
+
+        auth = FeishuUserAuth(settings)
+        info = auth.test()
+    except Exception as exc:
+        return {"performed": False, "error": str(exc)}
+    data = ((info.get("response") or {}).get("data")) or {}
+    open_id = data.get("open_id")
+    if not open_id:
+        return {"performed": False, "reason": "feishu user_info did not return open_id", "response": info}
+    try:
+        with settings.config_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        return {"performed": False, "error": f"failed to load config for backfill: {exc}"}
+    backup = settings.config_path.with_name(f"{settings.config_path.name}.bak-{_now_stamp()}")
+    try:
+        settings.config_path.replace(backup)
+    except FileNotFoundError:
+        backup = None
+    payload.setdefault("feishu", {})["default_assignee_open_id"] = open_id
+    _atomic_write(settings.config_path, payload)
+    return {
+        "performed": True,
+        "open_id": open_id,
+        "backup": str(backup) if backup else None,
+        "name": data.get("name"),
+    }
+
+
 def _command_first_run(args: argparse.Namespace) -> int:
     import subprocess
     from datetime import datetime as _dt
@@ -835,6 +922,18 @@ def _command_first_run(args: argparse.Namespace) -> int:
         print(f"[bootstrap] {exc}", file=sys.stderr)
         return 2
     ensure_runtime_dirs(settings)
+
+    # Best-effort: backfill default_assignee_open_id so feishu_doc_mentions
+    # (and other paths that need the user's own open_id) work from the first
+    # collect onwards.
+    assignee_backfill = _backfill_default_assignee(settings)
+    if assignee_backfill.get("performed"):
+        # Reload settings so downstream subprocesses see the new value.
+        try:
+            settings = load_settings(args.config)
+        except ConfigError as exc:
+            print(f"[bootstrap] reload after assignee backfill failed: {exc}", file=sys.stderr)
+            return 2
 
     # Reuse doctor so first-run never runs against a broken install.
     doctor_argv = argparse.Namespace(config=args.config, print_json=True)
@@ -959,6 +1058,7 @@ def _command_first_run(args: argparse.Namespace) -> int:
         "feishu_chat_count": collection_options.get("feishu_chat_count"),
         "chats_with_messages": (im_summary or {}).get("chats_with_messages"),
         "message_count": (im_summary or {}).get("message_count"),
+        "assignee_backfill": assignee_backfill,
     }
 
     broadcast = _broadcast_first_run_heartbeat(settings, run_summary)

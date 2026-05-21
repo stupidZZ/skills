@@ -107,6 +107,74 @@ def load_cursor(path: Path) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+# ----- IM chat blacklist -----------------------------------------------------
+# Feishu /im/v1/chats sometimes lists chat_id values that are no longer valid
+# containers (group dismissed, user left, thread-style chats, stale ids, ...).
+# Calling /im/v1/messages against them returns ``code=230001 invalid
+# container_id`` and pollutes every hourly heartbeat with the same warning.
+# We persist a small JSON blacklist so the next collect run skips them
+# automatically. The blacklist lives next to sync-cursor.json in state_dir.
+IM_BAD_CHAT_DEFAULT_ERROR_CODES = {230001}
+IM_BAD_CHAT_FAILURE_THRESHOLD = 3  # n consecutive failures before skipping
+
+
+def _im_bad_chats_path(state_dir: Path) -> Path:
+    return state_dir / "im-bad-chats.json"
+
+
+def load_im_bad_chats(state_dir: Path) -> Dict[str, Any]:
+    """Schema: { "chats": { "<chat_id>": { "code": int, "msg": str,
+    "failures": int, "first_seen_at": iso, "last_seen_at": iso,
+    "manual_override": bool } }, "updated_at": iso }.
+    """
+
+    payload = JsonStore.load(_im_bad_chats_path(state_dir), {})
+    if not isinstance(payload, dict):
+        return {"chats": {}}
+    chats = payload.get("chats")
+    if not isinstance(chats, dict):
+        chats = {}
+        payload["chats"] = chats
+    return payload
+
+
+def save_im_bad_chats(state_dir: Path, payload: Dict[str, Any]) -> None:
+    payload["updated_at"] = datetime.now(TZ).isoformat()
+    JsonStore.save(_im_bad_chats_path(state_dir), payload)
+
+
+def _im_bad_record_failure(payload: Dict[str, Any], chat_id: str, code: Optional[int], msg: str, now: datetime) -> Dict[str, Any]:
+    chats = payload.setdefault("chats", {})
+    record = dict(chats.get(chat_id) or {})
+    record["failures"] = int(record.get("failures") or 0) + 1
+    record["code"] = code
+    record["msg"] = msg
+    record["last_seen_at"] = now.isoformat()
+    record.setdefault("first_seen_at", now.isoformat())
+    record.setdefault("manual_override", False)
+    chats[chat_id] = record
+    return record
+
+
+def _im_bad_clear_success(payload: Dict[str, Any], chat_id: str) -> None:
+    chats = payload.get("chats") or {}
+    record = chats.get(chat_id)
+    if not isinstance(record, dict) or record.get("manual_override"):
+        return
+    if record.get("failures"):
+        record["failures"] = 0
+        record["cleared_at"] = datetime.now(TZ).isoformat()
+
+
+def _im_bad_should_skip(payload: Dict[str, Any], chat_id: str) -> bool:
+    record = (payload.get("chats") or {}).get(chat_id)
+    if not isinstance(record, dict):
+        return False
+    if record.get("manual_override"):
+        return True
+    return int(record.get("failures") or 0) >= IM_BAD_CHAT_FAILURE_THRESHOLD
+
+
 def save_cursor(path: Path, cursor: Dict[str, Any]) -> None:
     JsonStore.save(path, cursor)
 
@@ -369,6 +437,7 @@ def collect_feishu_cloud_chat_items(
     diagnostics: List[Dict[str, Any]],
     now: datetime,
     assignee_user_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -379,6 +448,10 @@ def collect_feishu_cloud_chat_items(
         chat_id = str(meta.get("chatId") or meta.get("chat_id") or "")
         if chat_id:
             chat_titles[chat_id] = str(session.get("title") or chat_id)
+    bad_payload: Dict[str, Any] = {"chats": {}}
+    if state_dir is not None:
+        bad_payload = load_im_bad_chats(state_dir)
+    skipped_chat_ids: List[str] = []
     cache_payload: Dict[str, Any] = {
         "generated_at": now.isoformat(),
         "since": since.isoformat(),
@@ -388,6 +461,7 @@ def collect_feishu_cloud_chat_items(
     summary_total_chats = len(chat_ids)
     summary_success_chats = 0
     summary_failed_chats = 0
+    summary_skipped_blacklisted = 0
     summary_chats_with_messages = 0
     summary_message_count = 0
     summary_message_samples: List[Dict[str, Any]] = []
@@ -396,6 +470,13 @@ def collect_feishu_cloud_chat_items(
         JsonStore.save(cache_path, cache_payload)
         return items
     for chat_id in chat_ids:
+        if _im_bad_should_skip(bad_payload, chat_id):
+            summary_skipped_blacklisted += 1
+            skipped_chat_ids.append(chat_id)
+            cache_payload["chats"].append(
+                {"chat_id": chat_id, "skipped": "im_bad_chats blacklist"}
+            )
+            continue
         page_token: Optional[str] = None
         chat_record: Dict[str, Any] = {"chat_id": chat_id, "pages": [], "normalized_count": 0}
         try:
@@ -420,6 +501,7 @@ def collect_feishu_cloud_chat_items(
                 if not has_more or not page_token:
                     break
             summary_success_chats += 1
+            _im_bad_clear_success(bad_payload, chat_id)
             if chat_record["normalized_count"]:
                 summary_chats_with_messages += 1
                 summary_message_count += int(chat_record["normalized_count"])
@@ -434,6 +516,14 @@ def collect_feishu_cloud_chat_items(
             chat_record["error"] = str(exc)
             chat_record["response"] = exc.payload
             summary_failed_chats += 1
+            code = None
+            msg = ""
+            if isinstance(exc.payload, dict):
+                code = exc.payload.get("code")
+                msg = str(exc.payload.get("msg") or "")
+            if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES:
+                record = _im_bad_record_failure(bad_payload, chat_id, code, msg, now)
+                chat_record["bad_chat_failures"] = record.get("failures")
             diagnostics.append(
                 {
                     "source": "im.v1.messages.error",
@@ -443,9 +533,13 @@ def collect_feishu_cloud_chat_items(
                     "response": exc.payload,
                     "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
                     "cache_path": str(cache_path),
+                    "will_blacklist_after": IM_BAD_CHAT_FAILURE_THRESHOLD if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES else None,
+                    "current_failure_count": int(((bad_payload.get("chats") or {}).get(chat_id) or {}).get("failures") or 0) if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES else None,
                 }
             )
         cache_payload["chats"].append(chat_record)
+    if state_dir is not None:
+        save_im_bad_chats(state_dir, bad_payload)
     diagnostics.append(
         {
             "source": "im.v1.messages.summary",
@@ -455,6 +549,8 @@ def collect_feishu_cloud_chat_items(
             "failed_chats": summary_failed_chats,
             "chats_with_messages": summary_chats_with_messages,
             "message_count": summary_message_count,
+            "skipped_blacklisted": summary_skipped_blacklisted,
+            "skipped_chat_id_samples": [redact_identifier(c) for c in skipped_chat_ids[:5]],
             "message_chat_samples": summary_message_samples[:20],
             "cache_path": str(cache_path),
         }
@@ -799,6 +895,7 @@ def main(argv: Sequence[str]) -> int:
                 diagnostics,
                 now,
                 assignee_user_id=assignee_user_id,
+                state_dir=settings.paths.state_dir,
             )
         )
 

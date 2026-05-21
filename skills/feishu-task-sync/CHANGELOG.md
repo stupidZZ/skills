@@ -3,7 +3,43 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.2.4 – batch-import permission manifest (in development)
+## 0.2.5 – auto-backfill assignee + IM bad-chat blacklist (in development)
+
+- `bootstrap.py first-run` now calls `/authen/v1/user_info` (already used
+  by `feishu_user_auth.py test`) immediately after OAuth, and writes the
+  resulting `open_id` back into `config.json.feishu.default_assignee_open_id`
+  when it is empty. Side effects:
+    * `feishu_doc_mentions` no longer skips with "missing assignee_user_id"
+      on the very first hourly tick after install.
+    * `feishu_tasks create` already discovered the same `open_id` from
+      historical state, but new installs that have never created a task
+      previously now get it on day one.
+    * The previous config.json is moved aside as
+      `config.json.bak-<timestamp>` before the rewrite.
+- `collect.py` learns an IM chat blacklist persisted at
+  `state/im-bad-chats.json`:
+    * Any chat that returns Feishu error code `230001 invalid
+      container_id` (or other codes added to `IM_BAD_CHAT_DEFAULT_ERROR_CODES`)
+      bumps a per-chat failure counter.
+    * Once a chat reaches `IM_BAD_CHAT_FAILURE_THRESHOLD` (default 3)
+      consecutive failures the next collect skips it entirely and reports
+      `summary.skipped_blacklisted` in the `im.v1.messages.summary`
+      diagnostic plus a sample of the redacted ids.
+    * A successful re-fetch resets the counter automatically, so a chat
+      that was temporarily broken comes back on its own.
+    * Manual override (`manual_override: true` in `im-bad-chats.json`) is
+      honoured -- useful for chats the user knows are permanently dead and
+      wants out of every heartbeat.
+- `bootstrap.py status` and `doctor` now read `im-bad-chats.json` and
+  surface `count`, `updated_at`, and the latest 10 entries (chat_id +
+  failures + last error message). This lets users inspect the blacklist
+  without grepping JSON by hand.
+- `prompts/heartbeat.md` adds a row for `skipped_blacklisted` in the
+  basic-info table and a dedicated optional section explaining the
+  blacklist progression so the heartbeat never escalates a `230001`
+  warning into a primary alert again.
+
+## 0.2.4 – batch-import permission manifest
 
 - New `permissions/required-scopes.json`: Feishu open platform batch-import
   payload listing all 11 user-identity scopes (and an empty `tenant` array
