@@ -3,7 +3,61 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.3.1 – OAuth-failure resilience + upgrade flow split (in development)
+## 0.3.2 – permissions self-check as activation step 0 (in development)
+
+Motivation: in 0.3.1 the user still has to remember to re-import the
+scope manifest after each release (e.g. 0.3.0 added
+`task:task:writeonly`). The previous activation flow told the agent to
+*always* paste the manifest and ask the user to import it, which means
+repeat installs of an unchanged release nag the user for nothing.
+0.3.2 makes the import step **fingerprint-driven**: the agent fetches
+the diff and only prompts the user when the manifest actually changed.
+
+- New `permissions/required-scopes.json` is now the single source of
+  truth. `bootstrap.py` derives `REQUIRED_USER_SCOPES` and
+  `_default_install_scopes()` from it (preserving on-disk order, with
+  `offline_access` promoted to the front of the consent URL).
+- New `bootstrap.py permissions-check` subcommand. Pure local read; no
+  Feishu calls. Computes a SHA256 fingerprint of the canonicalised
+  manifest (sorted scopes, sorted keys, no whitespace), compares it to
+  `state/permissions-imported.json`, and classifies the result as
+  `fresh` / `first_install` / `changed` /
+  `manifest_missing` / `manifest_parse_error`. When `changed`, the
+  payload includes `diff.added` / `diff.removed` so the agent can
+  surface only the deltas instead of pasting the whole manifest again.
+- New `bootstrap.py permissions-mark-imported` subcommand. Writes
+  `state/permissions-imported.json` with the current fingerprint plus
+  an embedded copy of the manifest at import time, so future
+  `permissions-check` runs can diff added/removed scopes without
+  consulting git history.
+- `bootstrap.py install` (stage 1) now refuses to mint an OAuth URL
+  when permissions are not fresh: it returns
+  `stage = "awaiting_permissions_import"` with the same diff payload.
+  This is the safety net that prevents an agent from racing past step 0
+  and asking for OAuth on a stale scope set.
+- `bootstrap.py status` and `doctor` payloads gain a
+  `permissions_check` block. `doctor`'s `overall_ok` flips to false
+  when the status is anything other than `fresh`, and
+  `_doctor_blocking_failures` returns a Chinese sentence telling the
+  agent which manifest delta to surface. This automatically gates
+  `install --resume`, `post-update`, and `reauth` on a current import.
+- SKILL.md activation rules: step 2 is now “权限自检”. The agent must
+  run `permissions-check` *before* collecting any config and branch on
+  the returned `status`. A new step 8 reminds the agent to repeat the
+  self-check on subsequent activations and offer `reauth` instead of
+  a full reinstall when the manifest is unchanged.
+- Bumped SKILL.md and top-level README skill row to 0.3.2.
+
+Verified locally:
+  - `permissions-check` cycles `first_install` -> `fresh` after
+    `permissions-mark-imported`.
+  - tampering `manifest_at_import` (removing `task:task:writeonly`)
+    flips status to `changed` with the correct `diff.added` list.
+  - `install --force --input -` returns
+    `stage=awaiting_permissions_import` when the marker is absent and
+    `stage=awaiting_oauth_callback` after `mark-imported`.
+
+## 0.3.1 – OAuth-failure resilience + upgrade flow split
 
 This release focuses on what happens when the user OAuth grant has been
 revoked by Feishu (refresh_token rotation collision, user-initiated

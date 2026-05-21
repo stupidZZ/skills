@@ -51,19 +51,86 @@ from runtime import (
 import updater as _updater
 
 
-REQUIRED_USER_SCOPES = [
-    "task:task:read",
-    "task:task:write",
-    "im:chat:readonly",
-    "im:message:readonly",
-    "im:message.p2p_msg:get_as_user",
-    "im:message.group_msg:get_as_user",
-    "drive:drive:readonly",
-    "docx:document:readonly",
-    "wiki:wiki:readonly",
-    "search:docs:read",
-    "offline_access",
-]
+# ---------------------------------------------------------------------------
+# Permissions manifest helpers
+# ---------------------------------------------------------------------------
+
+PERMISSIONS_MANIFEST_PATH = SKILL_DIR / "permissions" / "required-scopes.json"
+
+
+def _load_permissions_manifest() -> Dict[str, Any]:
+    """Return the parsed ``permissions/required-scopes.json``.
+
+    Falls back to an empty manifest when the file is missing or corrupt;
+    that case is reported by ``_command_permissions_check`` so the agent
+    can surface it instead of crashing.
+    """
+
+    try:
+        text = PERMISSIONS_MANIFEST_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"scopes": {"tenant": [], "user": []}}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"scopes": {"tenant": [], "user": []}, "_parse_error": True}
+
+
+def _manifest_user_scopes(manifest: Optional[Dict[str, Any]] = None) -> List[str]:
+    """User scopes declared in the manifest, preserving the on-disk order.
+
+    Order matters because the OAuth ``auth-url`` step renders the scopes
+    into a query string and the user-visible consent screen lists them in
+    that order. We deliberately do not sort here.
+    """
+
+    data = manifest if manifest is not None else _load_permissions_manifest()
+    scopes = ((data.get("scopes") or {}).get("user")) or []
+    seen: set = set()
+    ordered: List[str] = []
+    for scope in scopes:
+        if not isinstance(scope, str):
+            continue
+        if scope in seen:
+            continue
+        seen.add(scope)
+        ordered.append(scope)
+    return ordered
+
+
+def _manifest_canonical_bytes(manifest: Optional[Dict[str, Any]] = None) -> bytes:
+    """Stable canonical encoding for fingerprinting.
+
+    We sort keys and lists so cosmetic reorderings inside
+    ``required-scopes.json`` do not invalidate the user's import marker.
+    Anything else (added/removed scope, new tenant block, ...) does.
+    """
+
+    data = manifest if manifest is not None else _load_permissions_manifest()
+    scopes_block = (data.get("scopes") or {})
+    canonical = {
+        "scopes": {
+            "tenant": sorted([s for s in (scopes_block.get("tenant") or []) if isinstance(s, str)]),
+            "user": sorted([s for s in (scopes_block.get("user") or []) if isinstance(s, str)]),
+        }
+    }
+    return json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _manifest_fingerprint(manifest: Optional[Dict[str, Any]] = None) -> str:
+    import hashlib
+
+    return hashlib.sha256(_manifest_canonical_bytes(manifest)).hexdigest()
+
+
+def _permissions_marker_path(settings) -> Path:
+    return settings.paths.state_dir / "permissions-imported.json"
+
+
+# REQUIRED_USER_SCOPES is kept for back-compat with doctor / status payloads
+# that previously emitted this exact list. It is now derived from the
+# permissions manifest so adding a scope in one place updates everything.
+REQUIRED_USER_SCOPES = _manifest_user_scopes()
 
 CONFIG_SECRET_KEYS = {"app_secret"}
 TOKEN_KEY_HINTS = ("access_token", "refresh_token", "secret", "client_secret")
@@ -414,6 +481,55 @@ def _read_user_auth(state_path: Path) -> Dict[str, Any]:
     }
 
 
+def _safe_permissions_check(settings) -> Dict[str, Any]:
+    """Inline permissions classification for embedding in status/doctor.
+
+    Returns the same shape ``permissions-check`` emits in its JSON
+    payload, minus the user-facing ``instructions``. We never raise:
+    callers want a status dict even when the manifest is corrupt.
+    """
+
+    try:
+        if not PERMISSIONS_MANIFEST_PATH.exists():
+            return {"status": "manifest_missing"}
+        manifest = _load_permissions_manifest()
+        if manifest.get("_parse_error"):
+            return {"status": "manifest_parse_error"}
+        current_fp = _manifest_fingerprint(manifest)
+        marker_path = _permissions_marker_path(settings)
+        last_fp = None
+        imported_at = None
+        last_user_scopes: List[str] = []
+        if marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except Exception:
+                marker = {}
+            last_fp = marker.get("fingerprint")
+            imported_at = marker.get("imported_at")
+            embedded = marker.get("manifest_at_import") or {}
+            last_user_scopes = _manifest_user_scopes(embedded) if embedded else []
+        if last_fp is None:
+            status = "first_install"
+        elif last_fp == current_fp:
+            status = "fresh"
+        else:
+            status = "changed"
+        current_user_scopes = _manifest_user_scopes(manifest)
+        return {
+            "status": status,
+            "current_fingerprint": current_fp,
+            "last_imported_fingerprint": last_fp,
+            "last_imported_at": imported_at,
+            "diff": {
+                "added": sorted(set(current_user_scopes) - set(last_user_scopes)),
+                "removed": sorted(set(last_user_scopes) - set(current_user_scopes)),
+            },
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
 def _safe_update_check(settings) -> Dict[str, Any]:
     """Wrap ``updater.check`` so a transient network failure never breaks status."""
 
@@ -526,6 +642,7 @@ def _command_status(args: argparse.Namespace) -> int:
         "cursor": _read_sync_cursor(paths.sync_cursor_path),
         "im_bad_chats": _read_im_bad_chats(paths.state_dir),
         "update_check": _safe_update_check(settings),
+        "permissions_check": _safe_permissions_check(settings),
     }
     fallback = [
         f"config         : {payload['config_path']} (source={payload['config_source']})",
@@ -789,6 +906,9 @@ def _command_doctor(args: argparse.Namespace) -> int:
 
     im_bad_chats = _read_im_bad_chats(settings.paths.state_dir)
     update_check = _safe_update_check(settings)
+    permissions_check = _safe_permissions_check(settings)
+    if permissions_check.get("status") not in {"fresh"}:
+        overall_ok = False
 
     payload = {
         "ok": bool(overall_ok),
@@ -804,6 +924,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
         "required_user_scopes": REQUIRED_USER_SCOPES,
         "im_bad_chats": im_bad_chats,
         "update_check": update_check,
+        "permissions_check": _safe_permissions_check(settings),
     }
 
     suggestions: List[str] = []
@@ -877,6 +998,28 @@ def _doctor_blocking_failures(payload: Dict[str, Any]) -> List[str]:
         )
     if payload.get("missing_scopes"):
         reasons.append("补这些用户身份 scope 并发布版本：" + ", ".join(payload["missing_scopes"]))
+    perm = payload.get("permissions_check") or {}
+    perm_status = perm.get("status")
+    if perm_status == "first_install":
+        reasons.append(
+            "首次安装：请先在飞书开放平台导入 permissions/required-scopes.json + 发布版本，"
+            "然后调用 bootstrap.py permissions-mark-imported。"
+        )
+    elif perm_status == "changed":
+        diff = perm.get("diff") or {}
+        added = diff.get("added") or []
+        removed = diff.get("removed") or []
+        bits = []
+        if added:
+            bits.append("新增=" + ", ".join(added))
+        if removed:
+            bits.append("移除=" + ", ".join(removed))
+        reasons.append(
+            "权限 manifest 已变动，请重新导入并发布版本后调用 permissions-mark-imported。"
+            + (" 变动：" + "；".join(bits) if bits else "")
+        )
+    elif perm_status in {"manifest_missing", "manifest_parse_error"}:
+        reasons.append(f"permissions 清单不可用：{perm_status}。Skill 损坏，请重新下载。")
     return reasons
 
 
@@ -1250,19 +1393,19 @@ def _daily_summary_cron_content(settings: Any) -> str:
 
 
 def _default_install_scopes() -> List[str]:
-    return [
-        "offline_access",
-        "im:chat:readonly",
-        "im:message:readonly",
-        "im:message.p2p_msg:get_as_user",
-        "im:message.group_msg:get_as_user",
-        "drive:drive:readonly",
-        "docx:document:readonly",
-        "wiki:wiki:readonly",
-        "search:docs:read",
-        "task:task:read",
-        "task:task:write",
-    ]
+    """Scopes requested at OAuth ``auth-url`` time.
+
+    Driven by ``permissions/required-scopes.json``. We pull only the
+    scopes the *user* identity needs (tenant scopes are configured on
+    the app itself, not in the consent screen). ``offline_access`` is
+    promoted to the front so the consent screen consistently shows the
+    refresh-token grant first.
+    """
+
+    scopes = _manifest_user_scopes()
+    if "offline_access" in scopes:
+        scopes = ["offline_access"] + [s for s in scopes if s != "offline_access"]
+    return scopes
 
 
 def _command_install(args: argparse.Namespace) -> int:
@@ -1420,6 +1563,43 @@ def _command_install(args: argparse.Namespace) -> int:
         print(f"[bootstrap] config written but failed to load: {exc}", file=sys.stderr)
         return 2
 
+    # Activation step 0: refuse to mint an OAuth URL until the user has
+    # imported the current permission manifest into the Feishu developer
+    # console. Otherwise the consent screen silently drops any scope the
+    # console has not yet published, and we end up with a token whose
+    # effective scope set is a subset of what collect.py expects. This
+    # is what bit the user on the 0.3.0 task:task:writeonly addition.
+    perm = _safe_permissions_check(settings)
+    if perm.get("status") != "fresh":
+        manifest = _load_permissions_manifest()
+        result = {
+            "ok": False,
+            "stage": "awaiting_permissions_import",
+            "config_path": str(settings.config_path),
+            "permissions_check": perm,
+            "manifest_path": str(PERMISSIONS_MANIFEST_PATH),
+            "required_user_scopes": _manifest_user_scopes(manifest),
+            "required_tenant_scopes": [s for s in ((manifest.get("scopes") or {}).get("tenant") or []) if isinstance(s, str)],
+            "next_step": (
+                "在飞书开放平台 → 应用 → 权限管理里，使用批量导入粘贴 manifest_path 的 user scopes，"
+                "然后创建版本并发布。发布后调用 "
+                f"python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} permissions-mark-imported\uff0c"
+                "再重新调用 install 或告诉 Kian “启用 feishu-task-sync”继续。"
+            ),
+        }
+        fallback = [
+            "阶段 0 / 1：需要先处理权限变动，暂未生成 OAuth 链接。",
+            f"permissions_check : {perm.get('status')}",
+        ]
+        diff = (perm.get("diff") or {})
+        if diff.get("added"):
+            fallback.append("新增 scope : " + ", ".join(diff["added"]))
+        if diff.get("removed"):
+            fallback.append("移除 scope : " + ", ".join(diff["removed"]))
+        fallback.append("下一步: 参见 next_step。")
+        _emit(result, args.print_json, fallback)
+        return 0
+
     scopes = _default_install_scopes()
     auth = FeishuUserAuth(settings, scopes=scopes)
     auth_url = auth.build_auth_url()
@@ -1431,6 +1611,7 @@ def _command_install(args: argparse.Namespace) -> int:
         "auth_url": auth_url,
         "redirect_uri": settings.feishu.redirect_uri,
         "scopes": scopes,
+        "permissions_check": perm,
         "next_step": (
             "请用户在浏览器打开 auth_url 完成授权，然后把浏览器跳转后的完整 URL "
             "（正常是以 redirect_uri 开头，后面带 code/state）传回。使用命令："
@@ -1671,6 +1852,183 @@ def _command_post_update(args: argparse.Namespace) -> int:
     return 0 if doctor_rc == 0 else 2
 
 
+def _command_permissions_check(args: argparse.Namespace) -> int:
+    """Compare the on-disk permissions manifest to the user's last import.
+
+    Used as **step 0** of activation and as a guard inside ``post-update``.
+    The classification is:
+
+    * ``first_install``  - no marker yet; user must import the manifest and
+                           then call ``permissions-mark-imported``.
+    * ``changed``        - marker present but fingerprint differs; user must
+                           re-import (the OAuth handshake would silently
+                           drop scopes Feishu has not yet published).
+    * ``fresh``          - fingerprints match; activation may continue.
+    * ``manifest_missing`` / ``manifest_parse_error`` - the skill bundle
+                           on disk is corrupt; surface and abort.
+
+    Importantly, this command never calls Feishu; it can run before OAuth
+    is configured. ``post-update`` also calls it because the upstream
+    bundle that just landed may have added a scope (cf. 0.3.0 adding
+    ``task:task:writeonly``).
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    if not PERMISSIONS_MANIFEST_PATH.exists():
+        result = {
+            "ok": False,
+            "status": "manifest_missing",
+            "manifest_path": str(PERMISSIONS_MANIFEST_PATH),
+        }
+        _emit(result, args.print_json, [
+            "⚠️ 缺少 permissions/required-scopes.json。Skill 损坏，请重新下载。",
+        ])
+        return 2
+
+    manifest = _load_permissions_manifest()
+    if manifest.get("_parse_error"):
+        result = {
+            "ok": False,
+            "status": "manifest_parse_error",
+            "manifest_path": str(PERMISSIONS_MANIFEST_PATH),
+        }
+        _emit(result, args.print_json, [
+            "⚠️ permissions/required-scopes.json 不是合法 JSON。",
+        ])
+        return 2
+
+    current_user_scopes = _manifest_user_scopes(manifest)
+    current_tenant_scopes = [s for s in ((manifest.get("scopes") or {}).get("tenant") or []) if isinstance(s, str)]
+    current_fp = _manifest_fingerprint(manifest)
+
+    marker_path = _permissions_marker_path(settings)
+    last_fp: Optional[str] = None
+    last_user_scopes: List[str] = []
+    imported_at: Optional[str] = None
+    if marker_path.exists():
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except Exception:
+            marker = {}
+        last_fp = marker.get("fingerprint")
+        embedded = marker.get("manifest_at_import") or {}
+        last_user_scopes = _manifest_user_scopes(embedded if embedded else None) if embedded else []
+        imported_at = marker.get("imported_at")
+
+    if last_fp is None:
+        status = "first_install"
+    elif last_fp == current_fp:
+        status = "fresh"
+    else:
+        status = "changed"
+
+    added = sorted(set(current_user_scopes) - set(last_user_scopes))
+    removed = sorted(set(last_user_scopes) - set(current_user_scopes))
+
+    instructions = []
+    if status == "fresh":
+        instructions.append("权限清单与上次导入一致，可继续后续激活步骤。")
+    else:
+        instructions.extend([
+            "请在飞书开放平台 → 应用 → 权限管理中，使用右上角“批量编辑 / 批量导入”，粘贴 permissions/required-scopes.json 里的 user scopes。",
+            "导入之后请在同一页面“创建版本并发布”，否则 OAuth 握手时会静默丢弃未发布的 scope。",
+            f"发布成功后调用：python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} permissions-mark-imported",
+            "标记完成后再继续走 OAuth / install / reauth。",
+        ])
+
+    result = {
+        "ok": status == "fresh",
+        "status": status,
+        "manifest_path": str(PERMISSIONS_MANIFEST_PATH),
+        "marker_path": str(marker_path),
+        "current_fingerprint": current_fp,
+        "last_imported_fingerprint": last_fp,
+        "last_imported_at": imported_at,
+        "current_user_scopes": current_user_scopes,
+        "current_tenant_scopes": current_tenant_scopes,
+        "diff": {"added": added, "removed": removed},
+        "instructions": instructions,
+    }
+
+    lines: List[str] = []
+    if status == "fresh":
+        lines.append(f"✅ 权限 manifest 未变 (fingerprint={current_fp[:12]}…)。")
+    elif status == "first_install":
+        lines.append("ℹ️ 首次安装：请先在飞书开放平台导入权限清单并发布版本。")
+        lines.append(f"manifest: {PERMISSIONS_MANIFEST_PATH}")
+        lines.append(f"user scopes ({len(current_user_scopes)}): {', '.join(current_user_scopes)}")
+    elif status == "changed":
+        lines.append("⚠️ 权限 manifest 已变动，需要重新导入并发布。")
+        if added:
+            lines.append(f"新增 scope: {', '.join(added)}")
+        if removed:
+            lines.append(f"移除 scope: {', '.join(removed)}")
+        lines.append(f"最后一次导入时间: {imported_at or 'unknown'}")
+    for inst in instructions:
+        lines.append(f"  - {inst}")
+
+    _emit(result, args.print_json, lines)
+    return 0 if status == "fresh" else 1
+
+
+def _command_permissions_mark_imported(args: argparse.Namespace) -> int:
+    """Record that the user has imported & published the current manifest.
+
+    Writes ``state/permissions-imported.json`` with the fingerprint plus
+    an embedded copy of the manifest at import time. The embedded copy is
+    what lets future ``permissions-check`` runs diff added/removed scopes
+    without consulting git history.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    if not PERMISSIONS_MANIFEST_PATH.exists():
+        result = {"ok": False, "status": "manifest_missing"}
+        _emit(result, args.print_json, ["缺少 permissions/required-scopes.json。"])
+        return 2
+
+    manifest = _load_permissions_manifest()
+    if manifest.get("_parse_error"):
+        result = {"ok": False, "status": "manifest_parse_error"}
+        _emit(result, args.print_json, ["permissions/required-scopes.json 不是合法 JSON。"])
+        return 2
+
+    fingerprint = _manifest_fingerprint(manifest)
+    marker_payload = {
+        "fingerprint": fingerprint,
+        "imported_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "manifest_path": str(PERMISSIONS_MANIFEST_PATH),
+        "manifest_at_import": manifest,
+    }
+    marker_path = _permissions_marker_path(settings)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(marker_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = {
+        "ok": True,
+        "status": "recorded",
+        "marker_path": str(marker_path),
+        "fingerprint": fingerprint,
+        "user_scopes_count": len(_manifest_user_scopes(manifest)),
+    }
+    _emit(result, args.print_json, [
+        f"✅ 已记录权限导入（fingerprint={fingerprint[:12]}…）",
+        f"marker: {marker_path}",
+    ])
+    return 0
+
+
 def _read_local_version_safe() -> Optional[str]:
     try:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -1743,6 +2101,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="After `update apply`: run doctor and emit a broadcast notice instead of the first-run empty-Todo probe.",
     )
 
+    sub.add_parser(
+        "permissions-check",
+        help="Compare permissions/required-scopes.json against the user's last imported version. Activation step 0.",
+    )
+    sub.add_parser(
+        "permissions-mark-imported",
+        help="Record that the user has imported & published the current scope manifest in the Feishu developer console.",
+    )
+
     p_update = sub.add_parser(
         "update",
         help="Check or apply skill upgrades from the upstream repository. Wraps scripts/updater.py.",
@@ -1779,6 +2146,10 @@ def main(argv: Sequence[str]) -> int:
         return _command_reauth(args)
     if args.command == "post-update":
         return _command_post_update(args)
+    if args.command == "permissions-check":
+        return _command_permissions_check(args)
+    if args.command == "permissions-mark-imported":
+        return _command_permissions_mark_imported(args)
     if args.command == "update":
         forwarded: List[str] = []
         if args.config:

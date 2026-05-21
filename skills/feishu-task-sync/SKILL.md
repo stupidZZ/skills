@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.1
+version: 0.3.2
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -53,25 +53,48 @@ trigger_phrases:
 - 用户提到 “装好这个 Skill 但不知道怎么开始 / 怎么用”。
 - Agent 加载到本 Skill 且检测到 `<SKILL_DIR>/config.json` 不存在。
 
-引导式安装一共走 7 步，Agent 必须按顺序执行：
+引导式安装一共走 8 步，Agent 必须按顺序执行：
 
 1. **检查 Skill 安装路径**：在用户机器上找到 Skill 的真实绝对路径
    `<SKILL_DIR>`（典型为 `~/KianWorkspace/.kian/skills/installed/feishu-task-sync/`
    或 `~/Code/skills/skills/feishu-task-sync/`）。后续所有命令都要把
    `{{SKILL_DIR}}` 替换成它。
 
-2. **推动用户在飞书后台一次性导入权限**：读取
-   `{{SKILL_DIR}}/permissions/required-scopes.json`，把完整 JSON 贴给
-   用户，并指引：
-   - 路径：飞书开放平台 → 应用 → 权限管理 → 右上角“批量编辑 / 批量导入”
-     → 粘贴 JSON → 确定 / 导入。11 个用户身份 scope 一次到位。
-   - 同一页面的“安全设置 → 重定向 URL”里加上
-     `http://localhost:8765/feishu/oauth/callback`（或用户自定义的
-     `redirect_uri`）。
-   - 最后一定要点页面顶部的 **“创建版本并发布”**。本 Skill 始终假设需要
-     发布；未发布的情况下偶尔能给开发者本人临时生效，但其他人或新会话
-     都拿不到 scope，doctor / install 会立刻报 `missing_scopes`。
-   - **严禁让用户手动一项项在 UI 里勾**。
+2. **权限自检**（必须先于收集任何配置）：
+   ```bash
+   python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json permissions-check
+   ```
+   该命令不调飞书、不需要 OAuth，只对比 `permissions/required-scopes.json`
+   的 SHA256 指纹与 `state/permissions-imported.json` 里记录的上次导入。
+   根据返回的 `status` 分三种处理：
+
+   - `status == "fresh"`：权限未变，**跳过本步**，直接进第 3 步。不要重复
+     发“请去飞书后台导入权限”的指令，那会让用户重复劳动。
+   - `status == "first_install"`：首次安装。把完整的
+     `permissions/required-scopes.json` JSON 贴给用户，并指引：
+     - 路径：飞书开放平台 → 应用 → 权限管理 → 右上角“批量编辑 / 批量导入”
+       → 粘贴 JSON → 确定 / 导入。
+     - 同一页面的“安全设置 → 重定向 URL”里加上
+       `http://localhost:8765/feishu/oauth/callback`（或用户自定义的
+       `redirect_uri`）。
+     - 页面顶部 **“创建版本并发布”**。未发布的 scope OAuth 握手会静默
+       丢弃，后续 doctor / install 会立刻报 `missing_scopes`。
+     - **严禁让用户手动一项项在 UI 里勾**。
+   - `status == "changed"`：上游 manifest 发生变化（例如 0.3.0 增加了
+     `task:task:writeonly`）。只贴 `diff.added` / `diff.removed`，让用户
+     重新走同样的批量导入 + 发布流程；不需要重新粘贴全部 JSON，但顺便
+     提示一句“为保险起见也可以走一次批量导入覆盖”。
+
+   用户确认在飞书后台导入且发布完成后，Agent 调用：
+   ```bash
+   python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json permissions-mark-imported
+   ```
+   该命令把当前 manifest 的指纹写入 `state/permissions-imported.json`。
+   之后的 doctor / install / reauth 都会读到 `permissions_check.status
+   == "fresh"`，不再要求重新导入。
+
+   **例外**：`status == "manifest_missing"` 或 `manifest_parse_error`
+   说明 Skill 文件损坏，应提示用户重新安装 Skill。
 
 3. **列出广播渠道**：调用 Kian `ListBroadcastChannels`，让用户挑一个
    用作心跳 / 摘要的广播渠道；建议同一个渠道做两用，除非用户明确要
@@ -87,6 +110,10 @@ trigger_phrases:
    ```bash
    python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --input -
    ```
+   **双保险**：若返回 `stage == "awaiting_permissions_import"`，说明第
+   2 步的 `permissions-mark-imported` 还没跑完（例如用户跳着步骤直接
+   走 install）。Agent 顺着返回 JSON 里的 `next_step` 重新处理第 2 步，
+   然后再带 `--force` 重跑本 Stage 1。
    ```json
    {
      "feishu": {
