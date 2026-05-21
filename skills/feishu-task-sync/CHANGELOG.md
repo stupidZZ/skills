@@ -3,7 +3,32 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.2.1 – interactive bootstrap (in development)
+## 0.2.2 – install-time smoke test + uninstall (in development)
+
+- New `scripts/bootstrap.py first-run`:
+  * Re-uses `doctor` as a gate, refusing to run when health checks fail.
+  * Calls `collect.py --since-last-success` to populate state/output/chat
+    cache for the first time with real Feishu data.
+  * Forces an empty `latest-todos.json` so the install action never creates
+    real Feishu Tasks.
+  * Calls `feishu_tasks.py create --mark-success-cursor` so the cursor is
+    advanced; the first scheduled cron will only see fresh material.
+  * Emits a `broadcast.suggested_message` plus the configured
+    `broadcast.heartbeat_channel_id`. `bootstrap.py` does **not** POST any
+    webhook itself; the activating Kian agent is expected to forward the
+    string through Kian’s `broadcast` tool so the user sees a “✅ 首次安装
+    成功” heartbeat in Feishu seconds after OAuth finishes.
+- New `scripts/bootstrap.py uninstall`:
+  * Removes the per-install runtime: `<SKILL_DIR>/state/`,
+    `<SKILL_DIR>/output/`, `<SKILL_DIR>/config.json`.
+  * Requires `--yes` to skip the interactive confirmation.
+  * Never touches `cronjob.json` and never calls Feishu APIs. The activating
+    Kian agent must remove the cron entries (and optionally the dedicated
+    background agent) and the Feishu OAuth grant.
+- SKILL.md activation rules now require `first-run` as the install-time
+  smoke test, and document `uninstall` as the supported teardown path.
+
+## 0.2.1 – interactive bootstrap
 
 - New `scripts/bootstrap.py` with four subcommands:
   - `init` — interactive prompts (uses `getpass` for the secret) and writes

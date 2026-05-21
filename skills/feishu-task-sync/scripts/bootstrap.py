@@ -765,6 +765,303 @@ def _command_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# first-run
+# ---------------------------------------------------------------------------
+
+
+def _doctor_blocking_failures(payload: Dict[str, Any]) -> List[str]:
+    """Return human-readable reasons why first-run should refuse to start."""
+
+    reasons: List[str] = []
+    if not payload.get("python_version", {}).get("ok"):
+        reasons.append("Python 版本不足 3.9")
+    if not payload.get("skill_dirs", {}).get("ok"):
+        reasons.append("state_dir 或 output_dir 不可写")
+    user_auth = payload.get("user_auth") or {}
+    if not user_auth.get("has_user_access_token"):
+        reasons.append("尚未完成用户 OAuth（运行 feishu_user_auth.py auth-url + exchange）")
+    if not user_auth.get("has_refresh_token"):
+        reasons.append("用户授权缺少 refresh_token，请带上 offline_access 重新授权")
+    feishu_section = payload.get("feishu") or {}
+    if not feishu_section.get("ok"):
+        reasons.append(
+            "飞书 API 健康检查未通过：" + json.dumps(feishu_section, ensure_ascii=False)[:200]
+        )
+    if payload.get("missing_scopes"):
+        reasons.append("补这些用户身份 scope 并发布版本：" + ", ".join(payload["missing_scopes"]))
+    return reasons
+
+
+def _broadcast_first_run_heartbeat(settings: Any, summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Send a one-shot 'install complete' heartbeat.
+
+    The skill itself does not own broadcast plumbing; the Kian agent driving
+    installation is expected to do the actual webhook POST. This helper just
+    builds the human-facing payload so the agent can hand it to its broadcast
+    tool verbatim.
+    """
+
+    channel_id = settings.broadcast.heartbeat_channel_id
+    if not channel_id:
+        return {"sent": False, "reason": "broadcast.heartbeat_channel_id is null; agent must collect it before first-run"}
+
+    lines = [
+        "✅ feishu-task-sync 首次安装成功",
+        f"· skill_dir: {SKILL_DIR}",
+        f"· config_path: {settings.config_path}",
+        f"· auth_mode_used: {summary.get('auth_mode_used')}",
+        f"· cursor.last_success_at: {summary.get('cursor_last_success_at')}",
+        f"· 可见会话总数: {summary.get('feishu_chat_count')}",
+        f"· 本次消息: {summary.get('message_count', 0)} （首跑快速验证，不做 Todo 总结）",
+        f"· 本轮创建任务: 0（首跑强制空 Todo）",
+        f"· task_api / im_message_api / doc_api: 均 ok",
+    ]
+    return {
+        "sent": False,
+        "channel_id": channel_id,
+        "suggested_message": "\n".join(lines),
+        "note": "请使用 Kian 的 broadcast 工具将上面内容发到 channel_id。bootstrap.py 不拥有心跳发送能力。",
+    }
+
+
+def _command_first_run(args: argparse.Namespace) -> int:
+    import subprocess
+    from datetime import datetime as _dt
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    # Reuse doctor so first-run never runs against a broken install.
+    doctor_argv = argparse.Namespace(config=args.config, print_json=True)
+    # Capture doctor JSON without printing twice.
+    import io
+    import contextlib
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        doctor_rc = _command_doctor(doctor_argv)
+    try:
+        doctor_payload = json.loads(buffer.getvalue() or "{}")
+    except json.JSONDecodeError:
+        doctor_payload = {"ok": False, "raw": buffer.getvalue()}
+
+    if doctor_rc != 0:
+        reasons = _doctor_blocking_failures(doctor_payload) or ["doctor 返回非零退出码"]
+        result = {
+            "ok": False,
+            "step": "doctor",
+            "doctor": doctor_payload,
+            "blocking_reasons": reasons,
+        }
+        fallback = ["first-run 被拒绝，doctor 未通过："] + [f"  - {r}" for r in reasons]
+        _emit(result, args.print_json, fallback)
+        return 2
+
+    scripts_dir = SKILL_DIR / "scripts"
+    python = sys.executable or "python3"
+
+    # 1) collect.py --since-last-success
+    collect_proc = subprocess.run(
+        [python, str(scripts_dir / "collect.py"), "--config", str(settings.config_path), "--since-last-success"],
+        capture_output=True,
+        text=True,
+    )
+    if collect_proc.returncode != 0:
+        result = {
+            "ok": False,
+            "step": "collect",
+            "returncode": collect_proc.returncode,
+            "stderr": collect_proc.stderr,
+        }
+        fallback = [
+            "first-run 在 collect 阶段失败：",
+            f"  returncode={collect_proc.returncode}",
+            f"  stderr={(collect_proc.stderr or '').strip()[:500]}",
+        ]
+        _emit(result, args.print_json, fallback)
+        return 2
+
+    # 2) Force an empty todo payload to keep first-run install action decoupled
+    # from real semantic Todo extraction.
+    todos_path = settings.paths.todos_latest_path
+    todos_path.parent.mkdir(parents=True, exist_ok=True)
+    with todos_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "generated_at": _dt.now().astimezone().isoformat(timespec="seconds"),
+                "source": "bootstrap-first-run",
+                "todos": [],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+        f.write("\n")
+
+    # 3) feishu_tasks.py create --mark-success-cursor
+    create_proc = subprocess.run(
+        [
+            python,
+            str(scripts_dir / "feishu_tasks.py"),
+            "--config",
+            str(settings.config_path),
+            "create",
+            "--input",
+            str(todos_path),
+            "--mark-success-cursor",
+            "--print-json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if create_proc.returncode != 0:
+        result = {
+            "ok": False,
+            "step": "create",
+            "returncode": create_proc.returncode,
+            "stderr": create_proc.stderr,
+        }
+        fallback = [
+            "first-run 在 feishu_tasks create 阶段失败：",
+            f"  returncode={create_proc.returncode}",
+            f"  stderr={(create_proc.stderr or '').strip()[:500]}",
+        ]
+        _emit(result, args.print_json, fallback)
+        return 2
+
+    # 4) Pull post-run summary numbers.
+    try:
+        latest_collected = json.load(settings.paths.collected_dir.joinpath("latest.json").open("r", encoding="utf-8"))
+    except Exception:
+        latest_collected = {}
+    try:
+        latest_report = json.load(settings.paths.report_json_path.open("r", encoding="utf-8"))
+    except Exception:
+        latest_report = {}
+
+    auth_checks = latest_collected.get("auth_checks") or {}
+    collection_options = latest_collected.get("collection_options") or {}
+    diagnostics = latest_collected.get("diagnostics") or []
+    im_summary = next(
+        (d for d in diagnostics if d.get("source") == "im.v1.messages.summary"),
+        None,
+    )
+    cursor = (latest_report.get("cursor") or {})
+
+    run_summary = {
+        "auth_mode_used": auth_checks.get("auth_mode_used"),
+        "cursor_last_success_at": cursor.get("last_success_at"),
+        "feishu_chat_count": collection_options.get("feishu_chat_count"),
+        "chats_with_messages": (im_summary or {}).get("chats_with_messages"),
+        "message_count": (im_summary or {}).get("message_count"),
+    }
+
+    broadcast = _broadcast_first_run_heartbeat(settings, run_summary)
+
+    result = {
+        "ok": True,
+        "config_path": str(settings.config_path),
+        "summary": run_summary,
+        "broadcast": broadcast,
+    }
+    fallback = [
+        "first-run 全链路成功。",
+        f"auth_mode_used        = {run_summary['auth_mode_used']}",
+        f"cursor.last_success   = {run_summary['cursor_last_success_at']}",
+        f"feishu_chat_count     = {run_summary['feishu_chat_count']}",
+        f"chats_with_messages   = {run_summary['chats_with_messages']}",
+        f"message_count         = {run_summary['message_count']}",
+        "",
+        "发送心跳（交给 Kian agent 使用 broadcast 工具）：",
+        f"  channel_id   = {broadcast.get('channel_id')}",
+        "  suggested_message:",
+    ]
+    if broadcast.get("suggested_message"):
+        fallback.extend(f"    {line}" for line in broadcast["suggested_message"].split("\n"))
+    if not broadcast.get("channel_id"):
+        fallback.append("  (heartbeat_channel_id 未设置，请在 config.json 补上)")
+    _emit(result, args.print_json, fallback)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# uninstall
+# ---------------------------------------------------------------------------
+
+
+def _uninstall_targets(settings: Any) -> List[Path]:
+    """Return per-install user data paths that uninstall removes."""
+
+    targets: List[Path] = []
+    targets.append(settings.config_path)
+    state_dir = settings.paths.state_dir
+    if state_dir.exists():
+        targets.append(state_dir)
+    output_dir = settings.paths.output_dir
+    if output_dir.exists():
+        targets.append(output_dir)
+    return targets
+
+
+def _command_uninstall(args: argparse.Namespace) -> int:
+    import shutil
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+
+    targets = _uninstall_targets(settings)
+    if not targets:
+        result = {"ok": True, "removed": [], "note": "nothing to remove"}
+        _emit(result, args.print_json, ["nothing to remove"])
+        return 0
+
+    if not args.yes:
+        print("即将删除以下路径（包含 OAuth token / config / 运行状态）:")
+        for t in targets:
+            print(f"  - {t}")
+        print("\nbootstrap.py 不会修改 cronjob.json；请在卸载前手动删除本 skill 的 cron 条目，")
+        print("以免卸载后 cron 仍在试图访问被删文件。")
+        print("\n使用 --yes 参数跳过交互确认后重试。")
+        return 2
+
+    removed: List[str] = []
+    errors: List[Dict[str, Any]] = []
+    for target in targets:
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink(missing_ok=True)  # type: ignore[arg-type]
+            removed.append(str(target))
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            errors.append({"path": str(target), "error": str(exc)})
+
+    result = {
+        "ok": not errors,
+        "removed": removed,
+        "errors": errors,
+        "note": "bootstrap 不会动 cronjob.json / 未撤销飞书侧授权，请手动处理。",
+    }
+    fallback = ["已卸载以下路径:"]
+    fallback.extend(f"  - {p}" for p in removed)
+    if errors:
+        fallback.append("警告：")
+        fallback.extend(f"  - {e['path']}: {e['error']}" for e in errors)
+    fallback.append("请手动处理 cronjob.json 与飞书授权状态。")
+    _emit(result, args.print_json, fallback)
+    return 0 if not errors else 2
+
+
+# ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
 
@@ -791,6 +1088,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
     sub.add_parser("status", help="Local-only summary of config / state / token (no remote calls).")
     sub.add_parser("doctor", help="End-to-end health check, including live Feishu API probes.")
+
+    sub.add_parser(
+        "first-run",
+        help="After OAuth: gate on doctor, run collect -> empty todos -> create --mark-success-cursor, and emit a heartbeat suggestion the agent can broadcast.",
+    )
+
+    p_uninst = sub.add_parser(
+        "uninstall",
+        help="Remove the per-install state/output/config for this skill. Does NOT touch cronjob.json or Feishu authorisation.",
+    )
+    p_uninst.add_argument("--yes", action="store_true", help="Skip the interactive confirmation step.")
     return parser.parse_args(argv)
 
 
@@ -808,6 +1116,10 @@ def main(argv: Sequence[str]) -> int:
         return _command_status(args)
     if args.command == "doctor":
         return _command_doctor(args)
+    if args.command == "first-run":
+        return _command_first_run(args)
+    if args.command == "uninstall":
+        return _command_uninstall(args)
     raise SystemExit(f"unknown command: {args.command}")
 
 

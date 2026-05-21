@@ -7,7 +7,7 @@ description: |
   user added as assignee, and broadcasts hourly heartbeats plus a daily 11:00
   summary. Activate this skill when the user wants Kian to keep their Feishu
   Tasks in sync with recent Feishu activity without flooding the main chat.
-version: 0.2.1
+version: 0.2.2
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -104,11 +104,28 @@ prompt as a fallback.
    docs-api search) under the user token, reports `missing_scopes`, and also
    sanity-checks `cronjob.json` for stale `main-agent/tools/feishu-task-sync`
    paths. Exit code 0 means “safe to start cron”.
-6. **Create a dedicated background agent** (recommended name: 飞书任务后台助手)
+6. **First-run smoke test (required for “celebrate install success”)**:
+   `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json first-run`.
+   The command
+   * re-uses `doctor` as a gate — refuses to start unless everything is green;
+   * runs `collect.py --since-last-success` against the user’s real Feishu
+     data so cursor / state / chat caches are populated for the first time;
+   * intentionally writes an **empty** Todo JSON to keep the install action
+     decoupled from real semantic Todo extraction — we never create real
+     Feishu Tasks during install;
+   * calls `feishu_tasks.py create --mark-success-cursor`, which advances
+     the cursor so the next scheduled cron will only look at fresh material;
+   * returns a `broadcast.suggested_message` string and the configured
+     `broadcast.heartbeat_channel_id`. The activating Kian agent **must**
+     take that string and post it to the broadcast channel via Kian’s
+     `broadcast` tool, so the user sees “✅ 首次安装成功” in Feishu within
+     seconds of finishing OAuth. `bootstrap.py` itself never POSTs the
+     webhook — broadcast plumbing stays in Kian, not the Skill.
+7. **Create a dedicated background agent** (recommended name: 飞书任务后台助手)
    and bind both cron jobs to it via `targetAgentId`. Do **not** bind the
    hourly heartbeat or the daily summary to the user's main dev chat agent –
    it would flood the conversation.
-7. **Register cron jobs** in Kian's `cronjob.json` (5-field, minute-level)
+8. **Register cron jobs** in Kian's `cronjob.json` (5-field, minute-level)
    using the hourly and daily prompts shipped with this Skill. Substitute
    `{{SKILL_DIR}}` with the real absolute Skill path when writing the cron
    `content`. `bootstrap.py` does **not** write to `cronjob.json`; that is the
@@ -311,18 +328,33 @@ the heartbeat template, not the underlying collector.
 Access tokens, refresh tokens, and `app_secret` must never appear in any
 broadcast, log, or commit.
 
-## Uninstall (manual)
+## Uninstall
 
-0.2.0 does not yet ship a one-shot uninstaller. To remove the Skill:
+The Skill ships `scripts/bootstrap.py uninstall` for the parts the Skill
+itself owns. The activating Kian agent is responsible for the parts that
+live outside the Skill (cron, agent, Feishu OAuth grant).
 
-1. Pause and remove both cron entries (hourly and 11:00) in
-   `cronjob.json` belonging to this Skill.
-2. Decide whether to keep the dedicated background agent (the agent itself is
-   harmless without cron, but you may delete it from Kian's agent list).
-3. Optionally delete `<SKILL_DIR>/state/`, `<SKILL_DIR>/output/`, and
-   `<SKILL_DIR>/config.json` to remove tokens and runtime data.
-4. Revoke the Feishu app's authorization for your user on the Feishu
-   developer console if you want to fully de-authorize the OAuth grant.
+Walkthrough:
+
+1. **Remove the cron entries first.** In `cronjob.json`, delete both the
+   hourly and the daily entries whose `content` references this Skill. This
+   step is done by the Kian agent (or the user) directly; `bootstrap.py`
+   refuses to touch `cronjob.json`.
+2. **Run the uninstall command** to drop the per-install runtime data:
+
+   ```bash
+   python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json uninstall --yes
+   ```
+
+   It deletes `<SKILL_DIR>/state/`, `<SKILL_DIR>/output/`, and
+   `<SKILL_DIR>/config.json`. It never calls Feishu APIs and never touches
+   `cronjob.json`.
+3. **Optionally delete the dedicated background agent** (飞书任务后台助手)
+   from Kian's agent list if you do not plan to reinstall the Skill.
+4. **Optionally revoke the Feishu app's authorization** for your user on
+   the Feishu developer console to fully de-authorize the OAuth grant.
+   `bootstrap.py uninstall` only erases the local token; it cannot revoke
+   server-side authorization on Feishu's end.
 
 ## Known Limitations (0.2.0)
 
