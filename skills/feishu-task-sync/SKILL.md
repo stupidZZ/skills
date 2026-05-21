@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.2
+version: 0.3.3
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu

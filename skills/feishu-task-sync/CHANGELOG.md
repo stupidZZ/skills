@@ -3,7 +3,45 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.3.2 – permissions self-check as activation step 0 (in development)
+## 0.3.3 – recover from urllib IncompleteRead on chunked Feishu responses (in development)
+
+Motivation: on the 0.2.3 -> 0.3.2 in-place upgrade the user reported a
+``post-update`` doctor failure caused by ``drive.v1.files.list``
+raising ``http.client.IncompleteRead(~30-46KB)``. Curl against the
+same endpoint at the same moment returned HTTP 200 with the full 55KB
+body (171 files). The root cause is a long-standing urllib hiccup:
+when the Feishu drive endpoint emits the final chunked-encoding
+terminator slightly out of band, ``HTTPResponse.read()`` aborts with
+``IncompleteRead`` even though ``exc.partial`` already contains the
+full, valid JSON. The cron sync path (collect.py + IM + docs search)
+does not touch this endpoint, so the error only surfaced through
+``bootstrap.py doctor`` / ``post-update``.
+
+- ``FeishuClient._http_json`` now catches ``http.client.IncompleteRead``
+  (both inside the read and on the outer ``with`` boundary). When
+  ``exc.partial`` parses cleanly as JSON the call is treated as
+  successful and the returned dict is annotated with
+  ``_recovered_from_incomplete_read = True`` so callers and the
+  heartbeat can still surface the recovery without escalating it to a
+  doctor failure. When the partial cannot be parsed, the call is
+  raised as a normal ``FeishuApiError`` with a hint pointing at the
+  urllib chunked-read hiccup so the user does not chase a phantom
+  token/scope issue.
+- This is purely a transport-layer fix: no scope changes, no manifest
+  changes, no config schema changes, no behaviour change for the cron
+  collect path. Existing installs will pick it up via the usual
+  PATCH-level update flow (``bootstrap.py update apply`` followed by
+  ``bootstrap.py post-update``).
+- SKILL.md bumped to 0.3.3; top-level README skill row bumped to
+  0.3.3.
+
+Verified locally with mocked ``http.client.IncompleteRead`` injected
+at ``urlopen``: a valid JSON ``partial`` is recovered (returns
+``code=0`` with the expected payload and the annotation flag); a
+garbage ``partial`` raises ``FeishuApiError``; an empty ``partial``
+raises ``FeishuApiError``.
+
+## 0.3.2 – permissions self-check as activation step 0
 
 Motivation: in 0.3.1 the user still has to remember to re-import the
 scope manifest after each release (e.g. 0.3.0 added

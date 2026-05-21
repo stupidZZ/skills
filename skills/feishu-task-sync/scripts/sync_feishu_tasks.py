@@ -923,7 +923,33 @@ class FeishuClient:
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                body = resp.read().decode("utf-8")
+                try:
+                    body = resp.read().decode("utf-8")
+                except http.client.IncompleteRead as exc:
+                    # Some Feishu endpoints (notably drive.v1.files.list)
+                    # use chunked transfer encoding whose terminating
+                    # 0-chunk arrives slightly out of band on certain
+                    # paths. urllib's HTTPResponse.read() raises
+                    # IncompleteRead even though ``exc.partial`` holds
+                    # the complete JSON body -- ``curl`` against the
+                    # same endpoint at the same moment returns HTTP 200
+                    # with the full payload. If ``exc.partial`` parses
+                    # cleanly as JSON we treat the read as successful
+                    # and annotate the result so callers (and the
+                    # heartbeat) can still see that recovery happened.
+                    partial = exc.partial.decode("utf-8", errors="replace") if exc.partial else ""
+                    if partial:
+                        try:
+                            recovered = json.loads(partial)
+                        except Exception:
+                            recovered = None
+                        if isinstance(recovered, dict):
+                            recovered.setdefault("_recovered_from_incomplete_read", True)
+                            return recovered
+                    raise FeishuApiError(
+                        f"IncompleteRead calling {url}",
+                        {"raw": partial[:2000], "hint": "urllib chunked-read hiccup; curl typically succeeds"},
+                    ) from exc
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -936,6 +962,15 @@ class FeishuClient:
             raise FeishuApiError(f"Network error calling {url}: {exc.reason}", {"raw": str(exc.reason)}) from exc
         except http.client.RemoteDisconnected as exc:
             raise FeishuApiError(f"Network error calling {url}: remote disconnected", {"raw": str(exc)}) from exc
+        except http.client.IncompleteRead as exc:
+            # Same shape, but raised before the ``with`` block had a
+            # chance to wrap the read (e.g. the connection died after
+            # headers but before any body bytes arrived). Treat as a
+            # transient network failure.
+            raise FeishuApiError(
+                f"IncompleteRead calling {url}",
+                {"raw": str(exc), "hint": "urllib chunked-read hiccup; curl typically succeeds"},
+            ) from exc
 
     def tenant_access_token(self) -> str:
         if self._tenant_access_token:
