@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.0
+version: 0.3.1
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -180,6 +180,55 @@ Agent 在非异常情况下必须保持以下静默原则：
    删除 `<SKILL_DIR>` 下的 `config.json` / `state/` / `output/`。
 4. 提醒用户去飞书账户的“我的授权”页面撤销该 self-built app 的 OAuth
    授权（Agent 无法替用户撤销）。
+
+## 升级 vs 首次安装的区别
+
+* **首次安装**（`install` 或“启用 feishu-task-sync”）会走 OAuth → doctor →
+  **first-run**（空 Todo 探针）→ 渲染 cron entries。空 Todo 探针是设计
+  的一部分，验证部署后整条链路能走通、并把 `sync-cursor.json` 邨到
+  当前时点。
+* **升级**（`update apply` + `post-update`）**不走 first-run**。升级保留了
+  config / state / OAuth，只需要：doctor 验证新版本仍可以跑，然后
+  向心跳渠道发一句“升级成功”。绝不能在每次发 PATCH 时都创建一个空
+  Todo，那会扫乱用户的任务列表、也会让 sync_cursor 被误推进。
+* 在 `update apply` 完成后，`scripts/updater.py` 会在
+  `state/post-update-pending.json` 里写入一个标记，记录 from/to
+  version 与 backup 路径。`bootstrap.py post-update` 读取该标记、跑
+  doctor、生成广播字样 `broadcast.suggested_message`，成功后删除标记。
+* Agent 看到 `update apply` 返回 `next_step` 提示的那一刻，必须调用
+  `bootstrap.py post-update`、而不是 `bootstrap.py first-run`。
+
+## OAuth 失效后的恢复路径
+
+飞书 OAuth 会在以下场景下让 `state/user-auth.json` 里的 `refresh_token`
+被拒绝：
+
+1. 同一台机器上两份 Skill 副本同时拿着同一对 token，一方先 refresh 成功
+   后，另一方手里的 token 被轮换作废；
+2. 用户在飞书侧手动撤销了授权；
+3. 设备 / 会话被踢、或 app 安全策略更新。
+
+在 0.3.1+，collect 发现这一点后会直接停止并在
+`output/collected/latest.json` 写入：
+
+```
+auth_checks.user_auth_critical = true
+auth_checks.user_auth.refresh_error = "..."
+summary.halted = true
+summary.halt_reason = "user_auth_unavailable"
+```
+
+心跳需要把这一点作为顶部 banner 显示（见 `prompts/heartbeat.md` §§0）。恢复路径：
+
+* **推荐**：`python3 .../bootstrap.py reauth` → 点打印的 `auth_url`
+  授权 → `bootstrap.py reauth --redirect-url '<回调 URL>'`。`reauth`
+  **只刷新 user-auth.json**，不动 config、不动 cronjob.json、不走 first-run。
+* 对重釅不敏感的用户也可以在新对话里说 `启用 feishu-task-sync` 走完整重装。
+
+`feishu_user_auth.refresh()` 在 0.3.1+ 额外加了同主机 `flock` 锁（在
+`state/user-auth.json.refresh-lock` 上）：同机多个进程同时 refresh
+时，后者进入临界区后会重读状态，看到【同伴刚刷新过、access_token 还
+能活超过 5min】就不再去调飞书，避免自伤型 token 轮换。
 
 ## 自动更新检查
 

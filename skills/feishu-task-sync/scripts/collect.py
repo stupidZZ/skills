@@ -31,6 +31,14 @@ from sync_feishu_tasks import (
     parse_metadata,
 )
 from feishu_user_auth import FeishuUserAuthError
+
+
+class UserAuthUnavailableError(RuntimeError):
+    """Raised when ``auto`` mode cannot use the user OAuth credential and
+    we deliberately refuse to fall back to the tenant (app bot) token.
+
+    See ``resolve_feishu_client`` for why silent fallback is harmful.
+    """
 from runtime import (
     ConfigError,
     Settings,
@@ -813,6 +821,8 @@ def resolve_feishu_client(
         return FeishuClient(settings, auth_mode="tenant")
 
     user_client = FeishuClient(settings, auth_mode="user")
+    refresh_error: Optional[str] = None
+    refresh_error_payload: Dict[str, Any] = {}
     try:
         status = user_client.user_auth_status()
         auth_checks["user_auth"] = status
@@ -821,32 +831,40 @@ def resolve_feishu_client(
             auth_checks["auth_mode_used"] = "user"
             return user_client
     except (FeishuApiError, FeishuUserAuthError) as exc:
+        refresh_error = str(exc)
+        refresh_error_payload = redact_token_fields(getattr(exc, "payload", {}) or {})
         diagnostics.append(
             {
                 "source": "feishu_user_auth",
                 "ok": False,
                 "auth_mode_requested": requested,
-                "fallback": requested == "auto",
-                "error": str(exc),
-                "response": redact_token_fields(getattr(exc, "payload", {})),
+                "fallback": False,
+                "error": refresh_error,
+                "response": refresh_error_payload,
             }
         )
 
     if requested == "user":
         raise RuntimeError("Feishu user auth requested but no valid user token is available; run feishu_user_auth.py auth-url/exchange.")
 
-    auth_checks["auth_mode_used"] = "tenant"
-    diagnostics.append(
-        {
-            "source": "feishu_user_auth",
-            "ok": True,
-            "auth_mode_requested": requested,
-            "auth_mode_used": "tenant",
-            "fallback": True,
-            "reason": "user token missing, expired, or refresh failed",
-        }
-    )
-    return FeishuClient(settings, auth_mode="tenant")
+    # In ``auto`` mode the previous implementation silently fell back to the
+    # tenant (app bot) credential, which caused two pathologies for this
+    # skill: (a) it would surface a forest of fake ``missing_scopes`` because
+    # the app bot has no user-identity scope, drowning the real root cause;
+    # (b) it kept advancing the cursor as if collection had succeeded, even
+    # though the user-identity messages / docs were never actually fetched.
+    # We now treat "user OAuth no longer usable" as a hard stop in auto mode
+    # so the heartbeat can present a single, accurate banner.
+    existing_user_auth = auth_checks.get("user_auth") or {}
+    auth_checks["user_auth"] = {
+        **existing_user_auth,
+        "ok": False,
+        "refresh_error": refresh_error,
+        "refresh_error_payload": refresh_error_payload,
+    }
+    auth_checks["user_auth_critical"] = True
+    auth_checks["auth_mode_used"] = None
+    raise UserAuthUnavailableError(refresh_error or "user token missing, expired, or refresh failed")
 
 
 def main(argv: Sequence[str]) -> int:
@@ -869,7 +887,35 @@ def main(argv: Sequence[str]) -> int:
     diagnostics: List[Dict[str, Any]] = []
     auth_checks: Dict[str, Any] = {}
 
-    client = resolve_feishu_client(args, settings, diagnostics, auth_checks)
+    try:
+        client = resolve_feishu_client(args, settings, diagnostics, auth_checks)
+    except UserAuthUnavailableError as exc:
+        # Emit a minimal collected payload so the heartbeat / agent can still
+        # find the auth_checks block and broadcast a banner. We deliberately
+        # do NOT advance the cursor: the next cron tick will retry once the
+        # user has reauthorised.
+        output_path = Path(args.output) if args.output else settings.paths.collected_dir / "latest.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generated_at": now.isoformat(),
+            "window": {"since": since.isoformat(), "until": until.isoformat()},
+            "auth_checks": auth_checks,
+            "diagnostics": diagnostics,
+            "items": [],
+            "summary": {
+                "counts": {"total": 0},
+                "halted": True,
+                "halt_reason": "user_auth_unavailable",
+                "halt_detail": str(exc),
+            },
+        }
+        with output_path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        sys.stderr.write(
+            "[collect] user OAuth refresh failed; halting before any tenant fallback. "
+            "Run `bootstrap.py reauth` (or re-install) to recover.\n"
+        )
+        return 3
     assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
     feishu_chat_ids = discover_feishu_chat_ids(args.feishu_chat_id, sessions)
     if args.enable_feishu_cloud_chat:

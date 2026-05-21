@@ -198,7 +198,74 @@ class FeishuUserAuth:
                 ) from v1_error
 
     def refresh(self) -> Dict[str, Any]:
-        state = self.load_state()
+        """Refresh ``user_access_token``.
+
+        Feishu rotates ``refresh_token`` on every successful refresh: the
+        moment a new pair is issued, the old ``refresh_token`` becomes
+        invalid. If two processes on the same host both hold a stale copy
+        of ``state/user-auth.json`` (e.g. dev and prod skill clones), the
+        slower one will call refresh with an already-rotated token, get
+        ``invalid_grant``, and frequently trip the upstream safety policy
+        that revokes the entire grant.
+
+        We mitigate this with a same-host advisory file lock. The lock
+        file lives next to ``user-auth.json``; we ``fcntl.flock`` it
+        exclusively for the duration of the refresh, and re-read the
+        state under the lock so that if a peer just finished refreshing
+        we adopt their fresh tokens instead of calling Feishu again.
+        This does **not** protect against cross-machine races or
+        user-initiated revocation - those are upstream policy decisions
+        the script cannot influence.
+        """
+
+        return self._refresh_locked()
+
+    def _refresh_locked(self) -> Dict[str, Any]:
+        lock_path = self.state_path.with_suffix(self.state_path.suffix + ".refresh-lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import fcntl  # POSIX only; macOS + Linux are fine.
+        except ImportError:  # pragma: no cover - Windows fallback
+            return self._refresh_unlocked(self.load_state())
+
+        # ``a+`` so the file is created on first use and re-opened safely.
+        with open(lock_path, "a+") as lock_fh:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                # Unable to acquire (extremely rare); proceed without the
+                # lock rather than deadlock the cron tick.
+                return self._refresh_unlocked(self.load_state())
+            try:
+                # Re-read under the lock. If a peer just refreshed and the
+                # access token is still valid for >5min, return that
+                # without touching Feishu at all.
+                state = self.load_state()
+                token = str(state.get("user_access_token") or "")
+                expires_at = int(state.get("expires_at") or 0)
+                if token and expires_at > int(time.time()) + 300:
+                    return {
+                        "user_access_token": token,
+                        "refresh_token": state.get("refresh_token"),
+                        "expires_at": expires_at,
+                        "refresh_expires_at": state.get("refresh_expires_at"),
+                        "open_id": state.get("open_id"),
+                        "scope": state.get("scope"),
+                        "token_type": state.get("token_type"),
+                        "state_path": str(self.state_path),
+                        "updated_at": state.get("updated_at"),
+                        "redirect_uri": state.get("redirect_uri"),
+                        "token_source": "refresh-lock-peer-already-refreshed",
+                    }
+                return self._refresh_unlocked(state)
+            finally:
+                try:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+    def _refresh_unlocked(self, state: Dict[str, Any]) -> Dict[str, Any]:
         refresh_token = str(state.get("refresh_token") or "")
         if not refresh_token:
             raise FeishuUserAuthError("No refresh_token in user auth state.")

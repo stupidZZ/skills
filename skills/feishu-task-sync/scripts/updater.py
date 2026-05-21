@@ -242,7 +242,62 @@ def _rollback(backup: Path, skill_dir: Path) -> None:
     backup.rename(skill_dir)
 
 
-def apply_update(settings: Settings) -> Dict[str, Any]:
+def _extract_changelog_highlights(skill_dir: Path, to_version: Optional[str]) -> List[str]:
+    """Best-effort: pull the bullet lines under the ``to_version`` heading.
+
+    The CHANGELOG follows ``## <version> - <subject>``; we read the block
+    after that heading until the next ``##`` and keep up to 6 bullets.
+    Failures are silent because the broadcast is still useful without
+    highlights.
+    """
+
+    if not to_version:
+        return []
+    path = skill_dir / "CHANGELOG.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    pattern = re.compile(r"^##\s+" + re.escape(to_version) + r"\b.*?$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return []
+    rest = text[match.end():]
+    next_heading = re.search(r"^##\s+", rest, re.MULTILINE)
+    block = rest[: next_heading.start()] if next_heading else rest
+    bullets: List[str] = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            bullets.append(stripped[2:].strip())
+        if len(bullets) >= 6:
+            break
+    return bullets
+
+
+def _write_post_update_marker(
+    skill_dir: Path,
+    payload: Dict[str, Any],
+) -> Optional[Path]:
+    """Drop a marker file so ``bootstrap.py post-update`` knows what to say.
+
+    The marker lives at ``state/post-update-pending.json`` inside the
+    *new* skill directory (which is identical to the old one after the
+    swap, since ``state/`` is preserved). It is consumed and deleted by
+    ``bootstrap.py post-update`` after the success broadcast is emitted.
+    """
+
+    state_dir = skill_dir / "state"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        target = state_dir / "post-update-pending.json"
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return target
+    except Exception:
+        return None
+
+
+def apply_update(settings: Settings, *, from_version: Optional[str] = None, to_version: Optional[str] = None) -> Dict[str, Any]:
     """Replace the on-disk skill with the upstream version.
 
     Returns a structured dict reporting the operation. Raises ``RuntimeError``
@@ -259,6 +314,19 @@ def apply_update(settings: Settings) -> Dict[str, Any]:
         if not new_source.exists():
             raise RuntimeError(f"upstream repository does not contain {settings.updates.skill_path}.")
         backup = _replace_skill_dir(new_source, SKILL_DIR)
+        highlights = _extract_changelog_highlights(SKILL_DIR, to_version)
+        marker_payload = {
+            "from_version": from_version,
+            "to_version": to_version,
+            "backup": str(backup),
+            "skill_dir": str(SKILL_DIR),
+            "repository": settings.updates.repository,
+            "branch": settings.updates.branch,
+            "skill_path": settings.updates.skill_path,
+            "applied_at": datetime.now().isoformat(),
+            "changelog_highlights": highlights,
+        }
+        marker_written = _write_post_update_marker(SKILL_DIR, marker_payload)
         return {
             "ok": True,
             "backup": str(backup),
@@ -266,6 +334,8 @@ def apply_update(settings: Settings) -> Dict[str, Any]:
             "repository": settings.updates.repository,
             "branch": settings.updates.branch,
             "skill_path": settings.updates.skill_path,
+            "post_update_marker": str(marker_written) if marker_written else None,
+            "changelog_highlights": highlights,
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -385,15 +455,24 @@ def main(argv: Sequence[str]) -> int:
             _emit(payload, args.print_json, [f"dry-run: would upgrade from {result.local_version} to {result.remote_version}."])
             return 0
         try:
-            outcome = apply_update(settings)
+            outcome = apply_update(
+                settings,
+                from_version=result.local_version,
+                to_version=result.remote_version,
+            )
         except Exception as exc:
             payload = {"ok": False, "error": str(exc)}
             _emit(payload, args.print_json, [f"apply failed: {exc}"])
             return 2
         outcome.update({"from_version": result.local_version, "to_version": result.remote_version})
+        outcome["next_step"] = (
+            "Run `bootstrap.py post-update` to verify with doctor and broadcast a success notice. "
+            "Do NOT run `first-run` after an upgrade -- it would create an empty probe Todo."
+        )
         _emit(outcome, args.print_json, [
             f"applied {result.local_version} -> {result.remote_version}",
             f"backup retained at {outcome['backup']}",
+            "next: bootstrap.py post-update (not first-run).",
         ])
         return 0
 

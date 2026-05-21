@@ -1448,6 +1448,240 @@ def _command_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_reauth(args: argparse.Namespace) -> int:
+    """Re-run OAuth without touching config / cron / first-run.
+
+    ``reauth`` is the recovery path when ``state/user-auth.json`` has been
+    revoked by Feishu (refresh_token rotation collisions, user-initiated
+    revocation, app security policy update, ...). The full ``install``
+    flow would needlessly rewrite ``config.json`` and re-render cron
+    entries; ``reauth`` only updates ``state/user-auth.json`` and runs
+    ``doctor`` to confirm the new token works.
+
+    Stage 1 (no flags): print a fresh OAuth URL.
+    Stage 2 (``--redirect-url`` or ``--code``): exchange the code, save
+    the new token, run doctor for verification.
+    """
+
+    from feishu_user_auth import FeishuUserAuth
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    if not (args.redirect_url or args.code):
+        # Stage 1: emit auth URL.
+        scopes = _default_install_scopes()
+        auth = FeishuUserAuth(settings, scopes=scopes)
+        auth_url = auth.build_auth_url()
+        result = {
+            "ok": True,
+            "stage": "awaiting_oauth_callback",
+            "reason": "reauth: only rotates user-auth.json; config/cron/first-run untouched.",
+            "config_path": str(settings.config_path),
+            "auth_url": auth_url,
+            "redirect_uri": settings.feishu.redirect_uri,
+            "scopes": scopes,
+            "next_step": (
+                f"请用户在浏览器里打开 auth_url 完成授权，然后把跳转后的完整 URL 给过来："
+                f"python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} reauth --redirect-url '<回调 URL>'"
+            ),
+        }
+        fallback = [
+            "reauth 阶段 1：OAuth 链接已生成。",
+            f"auth_url     : {auth_url}",
+            f"redirect_uri : {settings.feishu.redirect_uri}",
+            "",
+            "下一步：用户授权后，调用 reauth --redirect-url '<回调 URL>'。",
+        ]
+        _emit(result, args.print_json, fallback)
+        return 0
+
+    # Stage 2: exchange code, then verify with doctor.
+    auth = FeishuUserAuth(settings)
+    try:
+        if args.code:
+            auth.exchange_code(args.code)
+        else:
+            from feishu_user_auth import extract_code
+
+            auth.exchange_code(extract_code(args.redirect_url))
+    except Exception as exc:
+        payload = getattr(exc, "payload", None)
+        result = {
+            "ok": False,
+            "stage": "exchange",
+            "error": str(exc),
+            "response": payload,
+        }
+        _emit(result, args.print_json, [f"OAuth exchange 失败：{exc}"])
+        return 2
+
+    # Run doctor in JSON mode so we can summarise it.
+    import io
+    import contextlib
+
+    doctor_argv = argparse.Namespace(config=args.config, print_json=True)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        doctor_rc = _command_doctor(doctor_argv)
+    try:
+        doctor_payload = json.loads(buffer.getvalue() or "{}")
+    except json.JSONDecodeError:
+        doctor_payload = {"ok": False, "raw": buffer.getvalue()}
+
+    result = {
+        "ok": doctor_rc == 0,
+        "stage": "verified" if doctor_rc == 0 else "doctor_failed",
+        "config_path": str(settings.config_path),
+        "user_auth_path": str(settings.paths.user_auth_path),
+        "doctor": doctor_payload,
+        "missing_scopes": doctor_payload.get("missing_scopes") or [],
+        "note": (
+            "reauth 仅刷新 state/user-auth.json；config.json / cronjob.json / 后台 Agent 均未动。"
+            " 下一轮 cron 会自动使用新 token 重试之前被 user_auth_unavailable 拦住的窗口。"
+        ),
+    }
+    if doctor_rc == 0:
+        fallback = [
+            "reauth 成功。user-auth.json 已刷新，doctor 验证通过。",
+            "不需要重新写入 cron 或重启后台 Agent。",
+        ]
+    else:
+        fallback = [
+            "reauth 完成了 OAuth，但 doctor 验证未通过。详情见 doctor 字段。",
+        ]
+    _emit(result, args.print_json, fallback)
+    return 0 if doctor_rc == 0 else 2
+
+
+def _post_update_marker_path(settings) -> Path:
+    return settings.paths.state_dir / "post-update-pending.json"
+
+
+def _command_post_update(args: argparse.Namespace) -> int:
+    """Finalise a self-update by verifying health and broadcasting a notice.
+
+    Behaves very differently from ``first-run``:
+
+    * **No empty-Todo probe**: an upgrade keeps the existing cursor, state,
+      and OAuth credentials. Creating a fake task on every patch release
+      would litter the user's Feishu task list and confuse the cursor.
+    * **Verification only**: run ``doctor`` to confirm the new bundle
+      still works against the existing config / OAuth state.
+    * **Broadcast a success notice**: emit ``broadcast.suggested_message``
+      summarising the version bump and any noteworthy CHANGELOG bullets
+      (the activating Kian agent is responsible for actually sending it,
+      same contract as ``first-run``).
+    * **Clear the post-update marker** written by ``update apply`` so
+      subsequent cron ticks behave normally.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    marker_path = _post_update_marker_path(settings)
+    marker: Dict[str, Any] = {}
+    if marker_path.exists():
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except Exception:
+            marker = {"raw": marker_path.read_text(encoding="utf-8")}
+
+    # Run doctor.
+    import io
+    import contextlib
+
+    doctor_argv = argparse.Namespace(config=args.config, print_json=True)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        doctor_rc = _command_doctor(doctor_argv)
+    try:
+        doctor_payload = json.loads(buffer.getvalue() or "{}")
+    except json.JSONDecodeError:
+        doctor_payload = {"ok": False, "raw": buffer.getvalue()}
+
+    from_version = marker.get("from_version")
+    to_version = marker.get("to_version")
+    local_now = _read_local_version_safe()
+    if not to_version:
+        to_version = local_now
+
+    channel_id = (settings.broadcast.heartbeat_channel_id or settings.broadcast.daily_summary_channel_id or "").strip() or None
+
+    if doctor_rc == 0:
+        summary_lines = [
+            f"✅ feishu-task-sync 已升级 {from_version or '?'} → {to_version or '?'}",
+            f"  - skill_dir : {SKILL_DIR}",
+            f"  - config    : {settings.config_path}",
+        ]
+        if marker.get("backup"):
+            summary_lines.append(f"  - backup    : {marker['backup']}")
+        summary_lines.append("  - doctor    : OK")
+        summary_lines.append("不需要跑空 Todo 测试，cron 会在下一个整点自动用新版本运行。")
+        if marker.get("changelog_highlights"):
+            summary_lines.append("主要变更：")
+            for line in marker["changelog_highlights"]:
+                summary_lines.append(f"  - {line}")
+    else:
+        reasons = _doctor_blocking_failures(doctor_payload) or ["doctor returned non-zero exit code"]
+        summary_lines = [
+            f"⚠️ feishu-task-sync 升级 {from_version or '?'} → {to_version or '?'} 后 doctor 未通过。",
+            "原因：",
+        ] + [f"  - {r}" for r in reasons]
+        if marker.get("backup"):
+            summary_lines.append(f"必要时可回滚：{marker['backup']}")
+
+    suggested_message = "\n".join(summary_lines)
+
+    result = {
+        "ok": doctor_rc == 0,
+        "stage": "upgraded" if doctor_rc == 0 else "upgrade_doctor_failed",
+        "from_version": from_version,
+        "to_version": to_version,
+        "skill_dir": str(SKILL_DIR),
+        "config_path": str(settings.config_path),
+        "marker": marker,
+        "doctor": doctor_payload,
+        "broadcast": {
+            "channel_id": channel_id,
+            "suggested_message": suggested_message,
+        },
+        "next_steps": [
+            "使用 Kian 的 broadcast 工具将 broadcast.suggested_message 发送到 broadcast.channel_id。",
+            "本命令已跳过 first-run 空 Todo 测试；不要手动重跑 first-run。",
+            "若 doctor 未通过且存在 marker.backup，可回滚：rm -rf <SKILL_DIR> && mv <backup> <SKILL_DIR>。",
+        ],
+    }
+
+    if doctor_rc == 0 and marker_path.exists():
+        try:
+            marker_path.unlink()
+        except OSError:
+            pass
+
+    _emit(result, args.print_json, summary_lines + ["", "下一步：将 broadcast.suggested_message 发送到 broadcast.channel_id。"])
+    return 0 if doctor_rc == 0 else 2
+
+
+def _read_local_version_safe() -> Optional[str]:
+    try:
+        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    import re as _re
+
+    match = _re.search(r"^\s*version\s*:\s*([0-9]+(?:\.[0-9]+){0,2})\s*$", text, _re.MULTILINE)
+    return match.group(1) if match else None
+
+
 # ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
@@ -1497,6 +1731,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p_install.add_argument("--redirect-url", default=None, help="Stage 2: the full callback URL the browser landed on after authorising.")
     p_install.add_argument("--code", default=None, help="Stage 2: raw authorisation code instead of the full callback URL.")
 
+    p_reauth = sub.add_parser(
+        "reauth",
+        help="Rotate user-auth.json only (after a Feishu OAuth revocation). Does NOT touch config / cron / first-run.",
+    )
+    p_reauth.add_argument("--redirect-url", default=None, help="Stage 2: the full callback URL the browser landed on.")
+    p_reauth.add_argument("--code", default=None, help="Stage 2: raw authorisation code instead of the redirect URL.")
+
+    sub.add_parser(
+        "post-update",
+        help="After `update apply`: run doctor and emit a broadcast notice instead of the first-run empty-Todo probe.",
+    )
+
     p_update = sub.add_parser(
         "update",
         help="Check or apply skill upgrades from the upstream repository. Wraps scripts/updater.py.",
@@ -1529,6 +1775,10 @@ def main(argv: Sequence[str]) -> int:
         return _command_uninstall(args)
     if args.command == "install":
         return _command_install(args)
+    if args.command == "reauth":
+        return _command_reauth(args)
+    if args.command == "post-update":
+        return _command_post_update(args)
     if args.command == "update":
         forwarded: List[str] = []
         if args.config:

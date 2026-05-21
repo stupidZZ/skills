@@ -8,6 +8,30 @@
 
 ## 卡片结构
 
+### 0. 顶部告警 banner（仅在出现致命故障时添加）
+
+**优先级高于其他一切字段。以下任一条件命中，都必须在心跳卡片最上方放一个醒目的告警行，且不得被 `auth_checks` 中的“假缺 scope”状况淹没：**
+
+- `latest.json.auth_checks.user_auth_critical == true`，或
+- `latest.json.auth_checks.user_auth.refresh_error` 非空，或
+- `latest.json.summary.halted == true` 且 `halt_reason == "user_auth_unavailable"`。
+
+模板（中文）：
+
+```
+⚠️ 用户 OAuth 已失效：refresh_token 被飞书侧拒绝（{{refresh_error 原文}}）。
+   本轮 collect 已主动停止，并且**未**推进游标；下轮 cron 仍会按同一个窗口重试。
+   恢复方式（任选其一，推荐前者）：
+     a) python3 {{SKILL_DIR}}/scripts/bootstrap.py --config {{SKILL_DIR}}/config.json reauth
+        —— 仅刷新 state/user-auth.json；不动 config、不动 cron、不走 first-run。
+     b) 在新对话里说 `启用 feishu-task-sync` 走完整重装流程。
+```
+
+发现该 banner 后，后续的 `接口与权限健康度` / `OAuth 状态` / `本轮结论` 都可以
+简化或省略，根源一句话说清楚即可；特别是不要再用一大段叙述“task_api ok=false / im_message_api ok=false”
+等偶作性警报，那些在老版本里是 tenant fallback 带出的假阳性；在 0.3.1+ 里应该不会再出现，
+如果还看到，在 banner 后面加一句“auth_mode_used=None，上述接口检查本轮未执行”即可。
+
 ### 1. 顶部基础信息表
 
 固定字段（按行展示）：

@@ -3,7 +3,64 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.3.0 – task-write probe + self-update mechanism (in development)
+## 0.3.1 – OAuth-failure resilience + upgrade flow split (in development)
+
+This release focuses on what happens when the user OAuth grant has been
+revoked by Feishu (refresh_token rotation collision, user-initiated
+revoke, security policy update, ...) and on giving upgrades a distinct
+path from fresh installs.
+
+- **`collect.py` no longer silently falls back to the tenant credential.**
+  When `--auth-mode auto` is in effect and user OAuth refresh fails,
+  `collect` now raises `UserAuthUnavailableError`, writes
+  `auth_checks.user_auth_critical=true` + `refresh_error` into
+  `output/collected/latest.json`, sets
+  `summary.halted=true / halt_reason=user_auth_unavailable`, and exits 3
+  without advancing the cursor. The previous fallback caused a forest of
+  fake `missing_scopes` (the app-bot identity has no user scope) that
+  drowned the real root cause.
+- **`prompts/heartbeat.md` adds a top-of-card alert banner**. Whenever
+  `auth_checks.user_auth_critical` or `summary.halt_reason ==
+  user_auth_unavailable` is set, the heartbeat must lead with a single
+  highlighted line pointing the user at `bootstrap.py reauth` (preferred)
+  or a full re-install. Subsequent sections must not parrot the fake
+  `missing_scopes` shape that older heartbeats produced.
+- **`feishu_user_auth.FeishuUserAuth.refresh()` is now wrapped in a
+  same-host advisory `flock`**. The lock file lives at
+  `state/user-auth.json.refresh-lock`. A second concurrent caller waits
+  for the holder, then re-reads the state and short-circuits if the peer
+  has already produced a fresh access token good for >5 minutes
+  (`token_source=refresh-lock-peer-already-refreshed`). This eliminates
+  the most common cause of token revocation in this repo's history --
+  dev and prod skill clones on the same machine fighting over the same
+  `refresh_token`. It does not protect against cross-machine collisions
+  or user-initiated revocation.
+- **New `bootstrap.py reauth` subcommand**. Stage 1 prints a fresh
+  OAuth URL (using the same 11-scope manifest as `install`); stage 2
+  exchanges the callback URL or raw code, writes the new tokens into
+  `state/user-auth.json`, then runs `doctor` for verification. `reauth`
+  intentionally does NOT touch `config.json`, `cronjob.json`, the
+  dedicated background agent, or `first-run`'s empty probe -- it is the
+  minimal recovery path for an OAuth-only failure.
+- **Upgrade flow split via `post-update`**. `scripts/updater.py apply_update`
+  now drops `state/post-update-pending.json` (recording from_version /
+  to_version / backup path / changelog highlights) immediately after
+  swapping in the new skill bundle, and the CLI's apply success message
+  points at `bootstrap.py post-update` as the next step. The new
+  `bootstrap.py post-update` subcommand runs `doctor`, emits a
+  `broadcast.suggested_message` summarising the upgrade plus changelog
+  bullets, and clears the marker. Critically it **does not** run the
+  first-run empty-Todo probe; doing so on every PATCH release would
+  litter the user's task list and incorrectly advance `sync-cursor.json`.
+  First installs continue to use `first-run` as before.
+- SKILL.md adds two new sections (升级 vs 首次安装的区别；OAuth 失效后的
+  恢复路径) so the activating Kian agent has explicit guidance on which
+  finalisation command to use.
+- `.gitignore` adds `**/user-auth.json.refresh-lock` (the lock file is
+  per-host runtime state, never committed).
+- Bumped to 0.3.1.
+
+## 0.3.0 – task-write probe + self-update mechanism
 
 - `permissions/required-scopes.json` now lists both `task:task:write` and
   `task:task:writeonly`. Different Feishu tenants surface the task-write

@@ -20,6 +20,7 @@ skills/*/config.json.bak-*
 
 # OAuth / Feishu secrets that may leak through copy-paste mistakes.
 **/user-auth.json
+**/user-auth.json.refresh-lock
 **/access_token*
 **/refresh_token*
 **/settings.local.json
