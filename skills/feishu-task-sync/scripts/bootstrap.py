@@ -48,6 +48,8 @@ from runtime import (
     load_settings,
 )
 
+import updater as _updater
+
 
 REQUIRED_USER_SCOPES = [
     "task:task:read",
@@ -412,6 +414,28 @@ def _read_user_auth(state_path: Path) -> Dict[str, Any]:
     }
 
 
+def _safe_update_check(settings) -> Dict[str, Any]:
+    """Wrap ``updater.check`` so a transient network failure never breaks status."""
+
+    if not getattr(settings.updates, "check", True):
+        return {"checked": False, "reason": "updates.check is false"}
+    try:
+        result = _updater.check(settings)
+    except Exception as exc:
+        return {"checked": False, "error": str(exc)}
+    return {
+        "checked": True,
+        "local_version": result.local_version,
+        "remote_version": result.remote_version,
+        "remote_sha": result.remote_sha,
+        "repository": result.repository,
+        "branch": result.branch,
+        "skill_path": result.skill_path,
+        "gap": result.gap,
+        "auto_apply_eligible": result.auto_apply_eligible,
+    }
+
+
 def _read_im_bad_chats(state_dir: Path) -> Dict[str, Any]:
     path = state_dir / "im-bad-chats.json"
     if not path.exists():
@@ -501,6 +525,7 @@ def _command_status(args: argparse.Namespace) -> int:
         "user_auth": _read_user_auth(paths.user_auth_path),
         "cursor": _read_sync_cursor(paths.sync_cursor_path),
         "im_bad_chats": _read_im_bad_chats(paths.state_dir),
+        "update_check": _safe_update_check(settings),
     }
     fallback = [
         f"config         : {payload['config_path']} (source={payload['config_source']})",
@@ -584,6 +609,25 @@ def _doctor_feishu_apis(settings) -> Tuple[Dict[str, Any], List[str]]:
             out["checks"].append({"name": name, "ok": bool(ok)})
 
     _record("task.v2.tasks.list", lambda: client.get_json("/task/v2/tasks", params={"page_size": 1}))
+    # Probe the write scope without creating a real task. The FeishuClient
+    # helper returns ok=False *only* when the bearer is missing
+    # task:task:write / task:task:writeonly; any business-level error
+    # (invalid GUID, missing field, etc.) means the scope is granted.
+    try:
+        write_probe = client.check_task_write_api()
+    except Exception as exc:
+        out["checks"].append({"name": "task.v2.tasks.write_probe", "ok": False, "error": str(exc)})
+    else:
+        scope_missing = write_probe.get("missing_scopes") or []
+        out["checks"].append({
+            "name": "task.v2.tasks.write_probe",
+            "ok": bool(write_probe.get("ok")),
+            "probe": write_probe.get("probe"),
+            "missing_scopes": scope_missing,
+        })
+        for scope in scope_missing:
+            if scope not in missing:
+                missing.append(scope)
     _record(
         "im.v1.chats.list",
         lambda: client.get_json("/im/v1/chats", params={"page_size": 1, "user_id_type": "open_id"}),
@@ -744,6 +788,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
     )
 
     im_bad_chats = _read_im_bad_chats(settings.paths.state_dir)
+    update_check = _safe_update_check(settings)
 
     payload = {
         "ok": bool(overall_ok),
@@ -758,6 +803,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
         "missing_scopes": missing_scopes,
         "required_user_scopes": REQUIRED_USER_SCOPES,
         "im_bad_chats": im_bad_chats,
+        "update_check": update_check,
     }
 
     suggestions: List[str] = []
@@ -1450,6 +1496,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p_install.add_argument("--resume", action="store_true", help="Stage 2: continue installation after OAuth.")
     p_install.add_argument("--redirect-url", default=None, help="Stage 2: the full callback URL the browser landed on after authorising.")
     p_install.add_argument("--code", default=None, help="Stage 2: raw authorisation code instead of the full callback URL.")
+
+    p_update = sub.add_parser(
+        "update",
+        help="Check or apply skill upgrades from the upstream repository. Wraps scripts/updater.py.",
+    )
+    update_sub = p_update.add_subparsers(dest="update_command", required=True)
+    update_sub.add_parser("check", help="Report local vs remote version + classification (patch/minor/major).")
+    apply_sub = update_sub.add_parser("apply", help="Replace the on-disk skill with the upstream version (preserves config/state/output).")
+    apply_sub.add_argument("--allow-major", action="store_true", help="Permit applying a major-version upgrade.")
+    apply_sub.add_argument("--dry-run", action="store_true", help="Report what would happen without writing anything.")
     return parser.parse_args(argv)
 
 
@@ -1473,6 +1529,19 @@ def main(argv: Sequence[str]) -> int:
         return _command_uninstall(args)
     if args.command == "install":
         return _command_install(args)
+    if args.command == "update":
+        forwarded: List[str] = []
+        if args.config:
+            forwarded.extend(["--config", args.config])
+        if args.print_json:
+            forwarded.append("--print-json")
+        forwarded.append(args.update_command)
+        if args.update_command == "apply":
+            if getattr(args, "allow_major", False):
+                forwarded.append("--allow-major")
+            if getattr(args, "dry_run", False):
+                forwarded.append("--dry-run")
+        return _updater.main(forwarded)
     raise SystemExit(f"unknown command: {args.command}")
 
 

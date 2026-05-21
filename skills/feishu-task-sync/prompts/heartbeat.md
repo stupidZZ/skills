@@ -92,7 +92,19 @@ container_id` 之类错误，下一轮仍会重试；达到 `will_blacklist_afte
 “本轮发现 N 个 chat 连续失败，到达阈值后会自动跳过”，不必拿出来当
 主告警。
 
-### 7. 历史趋势（可选）
+### 7. 上游更新检查（可选、仅在 gap 非 `up_to_date` / `unknown` 时出现）
+
+由 cron 或 `bootstrap.py update check` 写入的 `update_check` 字段：
+
+- `local_version` 与 `remote_version`、gap 分类。
+- 若 gap=`patch` 且 `auto_apply_eligible=true`，Agent 可提示“PATCH 升级可
+  自动执行”，并调用 `bootstrap.py update apply` 升级。
+- 若 gap 为 `minor` / `major`，仅提示用户“在新对话里说 `启用
+  feishu-task-sync` 重走安装流程”，不要自动 apply。
+- 若 gap=`unknown`（离线 / git 不可用 / 上游 SKILL.md 不可解析），静
+  默处理即可，不要报错。
+
+### 8. 历史趋势（可选）
 
 如果要展示过去 24h 的 99991679 / HTTP 504 / SSL / Remote disconnected 次数，
 必须放在独立小节并明确写出『最近一次同步是否已恢复』。如最近一次成功且本轮

@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.2.5
+version: 0.3.0
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -180,6 +180,28 @@ Agent 在非异常情况下必须保持以下静默原则：
    删除 `<SKILL_DIR>` 下的 `config.json` / `state/` / `output/`。
 4. 提醒用户去飞书账户的“我的授权”页面撤销该 self-built app 的 OAuth
    授权（Agent 无法替用户撤销）。
+
+## 自动更新检查
+
+Skill 自带轻量级的上游版本检查机制（`scripts/updater.py` + `scripts/bootstrap.py
+update ...`）：
+
+- `status` / `doctor` 输出的 `update_check` 字段会报告本地 SKILL.md 的
+  `version` 与 GitHub 上游同路径下 SKILL.md 的 `version`，以及版本差距
+  分类（`up_to_date` / `patch` / `minor` / `major` / `unknown`）。
+- 心跳 / 11:00 摘要遵循同一个原则：发现上游有新版时，提醒用户“在新
+  对话里说 `启用 feishu-task-sync` 重启安装流程”；不会静默重写任何文件。
+- 默认 `config.json.updates.check = true`、`auto_apply_patch_versions = false`。
+  用户同意后可以在 config.json 中把 `auto_apply_patch_versions` 打开，PATCH
+  级别升级（0.2.5 → 0.2.6）才会被 cron（或用户说“更新”时）自动
+  apply； MINOR / MAJOR 始终仅提示，不自动执行。
+- Agent 可以随时调用 `python3 {{SKILL_DIR}}/scripts/bootstrap.py --config
+  {{SKILL_DIR}}/config.json update check` 进行按需检查，及 `update apply
+  [--dry-run] [--allow-major]` 执行升级。`apply` 会将当前安装目录备份
+  为 `<SKILL_DIR>.bak-<时间戳>` 并从上游 clone，复活 user-owned 文件
+  （`config.json` / `state/` / `output/`）。`bootstrap.py update apply` 本身不
+  会动 `cronjob.json`；升级后如需刷新 cron `content`（模板变了），Agent
+  需补跳一次 stage=`ready` 的 `cron_entries` 重新写入 cronjob.json。
 
 ## 关键事实
 

@@ -877,6 +877,7 @@ def main(argv: Sequence[str]) -> int:
             if cloud_chat_id not in feishu_chat_ids:
                 feishu_chat_ids.append(cloud_chat_id)
     auth_checks["task_api"] = client.check_task_api()
+    auth_checks["task_write_api"] = client.check_task_write_api()
     if args.enable_feishu_cloud_chat:
         auth_checks["im_message_api"] = client.check_im_message_api(feishu_chat_ids[0] if feishu_chat_ids else None)
     if not args.disable_feishu_doc_mentions:

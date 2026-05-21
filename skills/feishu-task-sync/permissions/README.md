@@ -31,7 +31,14 @@ instead of toggling each scope by hand.
 - `scopes.user` — user-identity OAuth scopes. These are the ones the Skill
   asks for during OAuth (`bootstrap.py install` step 1). They must all be
   present **and the new app version must be published** before
-  authorisation will succeed for an arbitrary user. (You may sometimes see
+  authorisation will succeed for an arbitrary user.
+  * Feishu currently exposes the task-write capability under two names
+    (`task:task:write` and `task:task:writeonly`). Different tenants /
+    versions of the developer console surface only one of them at a time,
+    and the OAuth handshake will silently drop whichever name is not
+    registered on the application. The manifest lists both; the import
+    flow will skip the one your tenant does not recognise, but enabling
+    either is sufficient for the skill to create tasks. (You may sometimes see
   scope coverage take effect without a published version if you are
   testing under the developer's own account, but treat that as undefined
   behaviour; always publish before sharing the Skill with another user.)

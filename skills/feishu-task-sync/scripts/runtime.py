@@ -71,6 +71,25 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True)
+class UpdatesConfig:
+    """Self-update settings for the skill installation.
+
+    ``check`` controls whether the skill is allowed to consult the upstream
+    repository at all. ``auto_apply_patch_versions`` only matters when
+    ``check`` is true: when on, patch-level upgrades (e.g. 0.2.5 -> 0.2.6)
+    are applied automatically, while minor/major upgrades stay
+    prompt-only. ``repository`` and ``branch`` describe where to compare
+    against (defaults to the upstream the manifest ships from).
+    """
+
+    check: bool = True
+    auto_apply_patch_versions: bool = False
+    repository: str = "https://github.com/stupidZZ/skills"
+    branch: str = "main"
+    skill_path: str = "skills/feishu-task-sync"
+
+
+@dataclass(frozen=True)
 class Paths:
     workspace_root: Path
     agent_root: Path
@@ -102,6 +121,7 @@ class Settings:
     broadcast: BroadcastConfig
     paths: Paths
     retention: RetentionConfig
+    updates: UpdatesConfig
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -236,6 +256,31 @@ def _validate_retention(raw: Dict[str, Any]) -> RetentionConfig:
     )
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return default
+
+
+def _validate_updates(raw: Dict[str, Any]) -> UpdatesConfig:
+    if not isinstance(raw, dict):
+        raw = {}
+    return UpdatesConfig(
+        check=_coerce_bool(raw.get("check"), True),
+        auto_apply_patch_versions=_coerce_bool(raw.get("auto_apply_patch_versions"), False),
+        repository=_coerce_str(raw.get("repository")) or "https://github.com/stupidZZ/skills",
+        branch=_coerce_str(raw.get("branch")) or "main",
+        skill_path=_coerce_str(raw.get("skill_path")) or "skills/feishu-task-sync",
+    )
+
+
 def _resolve_paths(raw_paths: Dict[str, Any]) -> Paths:
     workspace_root = _coerce_path(raw_paths.get("workspace_root"))
     if workspace_root is None:
@@ -323,6 +368,7 @@ def load_settings(explicit_config: Optional[str] = None) -> Settings:
     broadcast = _validate_broadcast(raw.get("broadcast") or {})
     retention = _validate_retention(raw.get("retention") or {})
     paths = _resolve_paths(raw.get("paths") or {})
+    updates = _validate_updates(raw.get("updates") or {})
 
     return Settings(
         config_path=config_path,
@@ -332,6 +378,7 @@ def load_settings(explicit_config: Optional[str] = None) -> Settings:
         broadcast=broadcast,
         paths=paths,
         retention=retention,
+        updates=updates,
         raw=raw,
     )
 

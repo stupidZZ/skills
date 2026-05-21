@@ -992,6 +992,61 @@ class FeishuClient:
                 "missing_scopes": [scope for scope in TASK_SCOPE_HINTS if scope in msg],
             }
 
+    def check_task_write_api(self) -> Dict[str, Any]:
+        """Probe the task-write scope without actually creating a task.
+
+        Strategy: issue a PATCH against a deliberately invalid task GUID
+        and a known-invalid ``update_fields``. The feishu open platform
+        validates the bearer token's scope *before* the route validates
+        the GUID, so the response disambiguates between
+        ``task:task:write`` / ``task:task:writeonly`` being missing (the
+        scope-error code, typically ``99991679`` with explicit
+        ``permission_violations``) and any subsequent business error
+        (task not found, missing field, etc.). Anything that is not a
+        scope rejection counts as \"write scope is granted\".
+        """
+
+        write_scopes = ("task:task:write", "task:task:writeonly")
+        guid = "00000000-0000-0000-0000-000000000000"
+        try:
+            data = self._http_json(
+                "PATCH",
+                f"https://open.feishu.cn/open-apis/task/v2/tasks/{guid}",
+                payload={"task": {"summary": "feishu-task-sync write probe"}, "update_fields": ["summary"]},
+                headers=self.auth_headers(),
+            )
+            code = data.get("code") if isinstance(data, dict) else None
+            return {
+                "ok": True,
+                "probe": "patch-invalid-guid",
+                "response_code": code,
+                "missing_scopes": [],
+            }
+        except FeishuApiError as exc:
+            payload = exc.payload if isinstance(exc.payload, dict) else {}
+            code = payload.get("code")
+            msg = str(payload.get("msg") or "")
+            scope_error = bool(feishu_api_missing_scopes(payload, write_scopes)) or code == 99991679
+            if scope_error:
+                return {
+                    "ok": False,
+                    "probe": "patch-invalid-guid",
+                    "error": str(exc),
+                    "response": payload,
+                    "missing_scopes": list(write_scopes),
+                }
+            # Any non-scope error (route 404, GUID format error, etc.) means
+            # the bearer is *allowed* to call write APIs and the failure is
+            # purely on the made-up GUID we passed in. That is what we want
+            # the probe to confirm.
+            return {
+                "ok": True,
+                "probe": "patch-invalid-guid",
+                "response_code": code,
+                "response_msg": msg,
+                "missing_scopes": [],
+            }
+
     def check_doc_api(self) -> Dict[str, Any]:
         checks: List[Dict[str, Any]] = []
         for name, call in (

@@ -3,7 +3,49 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.2.5 – auto-backfill assignee + IM bad-chat blacklist (in development)
+## 0.3.0 – task-write probe + self-update mechanism (in development)
+
+- `permissions/required-scopes.json` now lists both `task:task:write` and
+  `task:task:writeonly`. Different Feishu tenants surface the task-write
+  capability under either name; importing both keeps the manifest
+  portable. `permissions/README.md` documents the duplication.
+- New `FeishuClient.check_task_write_api()` (in `sync_feishu_tasks.py`)
+  probes the task-write scope without ever creating a real task: it
+  PATCHes a deliberately invalid task GUID and treats any non-scope
+  response (route 404, missing field, ...) as proof the scope is granted.
+  Returned diagnostics flow through to both `bootstrap.py doctor` and the
+  hourly heartbeat as `auth_checks.task_write_api`.
+- `bootstrap.py doctor` adds a `task.v2.tasks.write_probe` check; if it
+  flags missing `task:task:write` / `task:task:writeonly`, the values are
+  merged into the top-level `missing_scopes` so the user can see exactly
+  what to enable in the developer console.
+- New self-update mechanism:
+  * `runtime.UpdatesConfig` (with defaults `check=true`,
+    `auto_apply_patch_versions=false`,
+    `repository=https://github.com/stupidZZ/skills`, `branch=main`,
+    `skill_path=skills/feishu-task-sync`) and a new `updates` section in
+    `config.example.json`.
+  * `scripts/updater.py`: `check` compares local SKILL.md `version`
+    against the upstream SKILL.md (raw.githubusercontent.com), plus a
+    `git ls-remote` SHA when git is available; `apply` shallow-clones the
+    upstream repository into a tempdir, moves the on-disk skill aside to
+    `<SKILL_DIR>.bak-<ts>`, copies the upstream skill into place, and
+    restores user-owned files (`config.json`, `state/`, `output/`) from
+    the backup. Refuses major upgrades unless `--allow-major` is passed;
+    supports `--dry-run` to show what would happen.
+  * `bootstrap.py status` / `doctor` now include an `update_check` field
+    so heartbeats / daily summaries can surface upstream availability
+    without launching a network probe themselves.
+  * `bootstrap.py update {check,apply}` forwards to the updater so the
+    activating Kian agent has a single CLI surface.
+  * `prompts/heartbeat.md` adds an optional "upstream update available"
+    section that points users at the appropriate response (auto-apply for
+    PATCH when allowed, prompt-only for MINOR/MAJOR).
+- SKILL.md bumped to 0.3.0; new "自动更新检查" section documents the
+  policy (check-by-default, opt-in patch auto-apply, prompt for
+  minor/major) and notes that `update apply` never touches `cronjob.json`.
+
+## 0.2.5 – auto-backfill assignee + IM bad-chat blacklist
 
 - `bootstrap.py first-run` now calls `/authen/v1/user_info` (already used
   by `feishu_user_auth.py test`) immediately after OAuth, and writes the

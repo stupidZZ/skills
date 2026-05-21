@@ -24,5 +24,12 @@
     "feishu_chat_cache_days": 3,
     "state_success_days": 3,
     "state_failed_days": 14
+  },
+  "updates": {
+    "check": true,
+    "auto_apply_patch_versions": false,
+    "repository": "https://github.com/stupidZZ/skills",
+    "branch": "main",
+    "skill_path": "skills/feishu-task-sync"
   }
 }
