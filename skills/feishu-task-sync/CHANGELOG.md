@@ -3,7 +3,7 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
-## 0.3.3 – recover from urllib IncompleteRead on chunked Feishu responses (in development)
+## 0.3.3 – recover from urllib IncompleteRead on chunked Feishu responses
 
 Motivation: on the 0.2.3 -> 0.3.2 in-place upgrade the user reported a
 ``post-update`` doctor failure caused by ``drive.v1.files.list``
