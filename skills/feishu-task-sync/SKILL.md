@@ -1,8 +1,8 @@
 ---
 name: feishu-task-sync
 description: |
-  飞书 Todo 后台同步 Skill。安装后用户在 Kian 对话里说"开始" / "初始化"
-  / "启用 feishu-task-sync" / "install feishu-task-sync" 等触发短语，
+  飞书 Todo 后台同步 Skill。安装完成后，用户请在一个新对话里说
+  "启用 feishu-task-sync" 或 "install feishu-task-sync" 以触发安装。
   Agent 必须立刻按本 SKILL.md 顶部的"激活规则"驱动完整安装流程：先让
   用户用 permissions/required-scopes.json 批量导入飞书后台权限并发布
   版本 → 收 config 字段 → 调 bootstrap.py install 走 OAuth → 自动
@@ -31,12 +31,11 @@ required_user_scopes:
   - offline_access
 config_schema_version: 1
 state_schema_version: 1
+# 触发短语需要足够明确，避免被主开发对话里的 "开始" / "初始化" 误触发。建议用户
+# 在新对话里发下面任一条即可启动安装流程。
 trigger_phrases:
-  - 开始
-  - 初始化
   - 启用 feishu-task-sync
   - install feishu-task-sync
-  - 安装飞书同步
 ---
 
 # 飞书 Todo 后台同步 Skill（Agent 视角）
