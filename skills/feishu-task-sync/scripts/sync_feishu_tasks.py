@@ -1466,7 +1466,11 @@ def main(argv: Sequence[str]) -> int:
     report_md = Path(args.report_md) if args.report_md else settings.paths.report_md_path
 
     state = JsonStore.load(state_path, {"processed": {}})
-    client = FeishuClient(settings)
+    # Legacy sync_feishu_tasks.py entry point. Must also use the user
+    # identity to match feishu_tasks.command_create; otherwise the
+    # deprecated --create fallback would still hit the same
+    # task:task:write deficit the cron path used to.
+    client = FeishuClient(settings, auth_mode="user")
     auth_check = client.check_task_api()
     sessions = load_sessions(chat_root)
     assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)

@@ -3,6 +3,62 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.4 – task-create must use the user identity + stale-running cursor self-heal
+
+User report (from the 0.3.2 heartbeat that finally produced a real
+Todo about "Jack candidate"): the create-task path was being rejected
+with ``Access denied. One of the following scopes is required:
+[task:task:write, task:task:writeonly]`` and ``token_type=tenant``.
+The cursor also got stuck on ``last_status="running"`` after the
+01:00 tick crashed mid-flight on the pre-0.3.3 IncompleteRead, so
+subsequent heartbeats kept showing a phantom "still running" cycle
+even after the next cron tick finished.
+
+Two independent fixes in one release:
+
+1. **Task-create routes through the user identity, not the tenant**.
+   ``feishu_tasks.command_create``, ``feishu_tasks.command_auth_check``
+   and ``sync_feishu_tasks``'s legacy ``--create`` fallback now
+   instantiate ``FeishuClient(settings, auth_mode="user")``. This is
+   the only correct identity for this skill: the manifest deliberately
+   leaves ``scopes.tenant = []`` (the app-bot is never supposed to
+   have task scope), task creation is supposed to make the *user* the
+   task's creator, and ``task:task:write`` / ``task:task:writeonly``
+   live on the user identity. Picking up tenant by default was a
+   leftover from an earlier design that never got reconciled with the
+   user-OAuth pivot. The bug only surfaced now because the previous
+   heartbeats happened to produce zero Todos.
+2. **collect.mark_cursor_started self-heals stale ``running`` cursors**.
+   When a cron tick crashes mid-flight (urllib IncompleteRead pre-0.3.3,
+   OOM kill, mac sleep + SIGKILL, ...), the cursor previously stayed
+   on ``last_status="running"`` until somebody hand-edited the JSON.
+   collect now detects this on startup: if the prior tick is still
+   marked ``running`` and its ``last_started_at`` is older than
+   ``STALE_RUNNING_SECONDS`` (90 minutes, ie 1.5x the default hourly
+   cron interval), it forcibly downgrades the previous record to
+   ``"failed"`` (preserving ``last_success_at``), annotates
+   ``last_error = "stale_running_recovered: ..."`` for the heartbeat
+   to surface, and then starts the new tick normally. The window math
+   itself is unchanged because ``compute_window`` only consults
+   ``last_success_at``.
+
+Not in scope: this release does not add ``task:task:write`` to the
+tenant manifest. The whole point of fix (1) is that no tenant task
+scope is required for this skill's purpose; if a future use case ever
+wants the app-bot to act as task creator, that will be a separate
+manifest change documented in its own release.
+
+SKILL.md bumped to 0.3.4; top-level README skill row bumped to 0.3.4;
+CHANGELOG entry above.
+
+Verified locally:
+  - Synthetic cursor file with ``last_status="running"`` and
+    ``last_started_at`` four hours in the past, after
+    ``mark_cursor_started`` runs, contains the
+    ``stale_running_recovered`` annotation and preserves
+    ``last_success_at``.
+  - py_compile across the changed scripts is clean.
+
 ## 0.3.3 – recover from urllib IncompleteRead on chunked Feishu responses
 
 Motivation: on the 0.2.3 -> 0.3.2 in-place upgrade the user reported a

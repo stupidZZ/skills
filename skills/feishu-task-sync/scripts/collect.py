@@ -187,8 +187,34 @@ def save_cursor(path: Path, cursor: Dict[str, Any]) -> None:
     JsonStore.save(path, cursor)
 
 
+STALE_RUNNING_SECONDS = 90 * 60  # 1.5x the default hourly cron interval
+
+
 def mark_cursor_started(path: Path, now: datetime) -> Dict[str, Any]:
+    """Record that a new collect tick is starting.
+
+    Self-healing: if the previous tick crashed mid-flight (e.g. urllib
+    IncompleteRead before 0.3.3, OOM, machine sleep with a kill signal)
+    the cursor would be stuck on ``last_status="running"`` until
+    somebody intervened. From this version on, when we see
+    ``last_status=="running"`` whose ``last_started_at`` is older than
+    ``STALE_RUNNING_SECONDS``, we forcibly downgrade it to
+    ``"failed"`` (preserving ``last_success_at``) so the new tick can
+    proceed cleanly. The window math itself is unaffected because
+    ``compute_window`` only consults ``last_success_at``.
+    """
+
     cursor = load_cursor(path)
+    prior_status = cursor.get("last_status")
+    if prior_status == "running":
+        prior_started = parse_dt(cursor.get("last_started_at"))
+        if prior_started is None or (now - prior_started).total_seconds() >= STALE_RUNNING_SECONDS:
+            cursor["last_status"] = "failed"
+            cursor["last_finished_at"] = now.isoformat()
+            cursor["last_error"] = (
+                "stale_running_recovered: previous tick exceeded "
+                f"{STALE_RUNNING_SECONDS}s without finishing; forced to failed."
+            )
     cursor["last_started_at"] = now.isoformat()
     cursor["last_status"] = "running"
     cursor["updated_at"] = now.isoformat()

@@ -262,7 +262,11 @@ def command_auth_check(args: argparse.Namespace) -> int:
     chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
     report_json = Path(args.report_json) if args.report_json else settings.paths.report_json_path
     report_md = Path(args.report_md) if args.report_md else settings.paths.report_md_path
-    client = FeishuClient(settings)
+    # Task APIs only work against the user identity in this skill: the
+    # app-bot (tenant) has no task scope and the manifest deliberately
+    # leaves scopes.tenant empty. command_auth_check therefore probes
+    # using the same credential the cron path will actually use.
+    client = FeishuClient(settings, auth_mode="user")
     sessions = load_sessions(chat_root)
     assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
     auth_check = client.check_task_api()
@@ -312,7 +316,13 @@ def command_create(args: argparse.Namespace) -> int:
     state, removed_by_gc = gc_state_entries(state, now)
     processed = dict(state.get("processed", {}))
 
-    client = FeishuClient(settings)
+    # Critical: create_task must run as the user, not the tenant. The
+    # tenant identity has no task:task:write / task:task:writeonly in
+    # the manifest, and even if a maintainer added them, tasks created
+    # by the tenant token would show 'creator = app-bot' rather than
+    # the user. The whole skill is designed around the user being the
+    # task owner.
+    client = FeishuClient(settings, auth_mode="user")
     sessions = load_sessions(chat_root)
     assignee_user_id = discover_assignee_user_id(args.assignee_user_id, settings, sessions, chat_root)
 
