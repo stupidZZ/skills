@@ -43,6 +43,7 @@ from runtime import (
     SKILL_DIR,
     SUPPORTED_CONFIG_SCHEMA_VERSION,
     ConfigError,
+    _coerce_str,
     add_config_argument,
     ensure_runtime_dirs,
     load_settings,
@@ -56,6 +57,7 @@ import updater as _updater
 # ---------------------------------------------------------------------------
 
 PERMISSIONS_MANIFEST_PATH = SKILL_DIR / "permissions" / "required-scopes.json"
+EVENTS_MANIFEST_PATH = SKILL_DIR / "events" / "required-events.json"
 
 
 def _load_permissions_manifest() -> Dict[str, Any]:
@@ -125,6 +127,85 @@ def _manifest_fingerprint(manifest: Optional[Dict[str, Any]] = None) -> str:
 
 def _permissions_marker_path(settings) -> Path:
     return settings.paths.state_dir / "permissions-imported.json"
+
+
+# ---------------------------------------------------------------------------
+# Events manifest helpers (0.3.8+)
+# ---------------------------------------------------------------------------
+
+
+def _load_events_manifest() -> Dict[str, Any]:
+    try:
+        text = EVENTS_MANIFEST_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"events": []}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"events": [], "_parse_error": True}
+
+
+def _events_canonical_bytes(manifest: Optional[Dict[str, Any]] = None) -> bytes:
+    data = manifest if manifest is not None else _load_events_manifest()
+    events = data.get("events") or []
+    canonical = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        canonical.append({
+            "name": str(ev.get("name") or ""),
+            "version": str(ev.get("version") or ""),
+            "required_scopes_any_of": sorted(
+                [s for s in (ev.get("required_scopes_any_of") or []) if isinstance(s, str)]
+            ),
+        })
+    canonical.sort(key=lambda e: (e["name"], e["version"]))
+    return json.dumps({"events": canonical}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _events_fingerprint(manifest: Optional[Dict[str, Any]] = None) -> str:
+    import hashlib
+
+    return hashlib.sha256(_events_canonical_bytes(manifest)).hexdigest()
+
+
+def _events_marker_path(settings) -> Path:
+    return settings.paths.state_dir / "events-confirmed.json"
+
+
+# ---------------------------------------------------------------------------
+# Kian feishu chat-channel helpers (0.3.8+)
+# ---------------------------------------------------------------------------
+
+
+def _kian_settings_path() -> Path:
+    """Where Kian writes its global runtime settings.
+
+    The chat-channel block lives at ``chatChannels.feishu`` and contains
+    the bot app credential, the owner-user-id whitelist, and the
+    enabled flag. We never write here; only read.
+    """
+
+    return Path(os.path.expanduser("~/KianWorkspace/.kian/settings.json"))
+
+
+def _read_kian_feishu_channel() -> Dict[str, Any]:
+    path = _kian_settings_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"_status": "settings_not_found", "path": str(path)}
+    except json.JSONDecodeError as exc:
+        return {"_status": "settings_parse_error", "path": str(path), "error": str(exc)}
+    chat = (raw.get("chatChannels") or {}).get("feishu") or {}
+    return {
+        "_status": "ok",
+        "path": str(path),
+        "enabled": bool(chat.get("enabled")),
+        "app_id": _coerce_str(chat.get("appId")),
+        "app_secret_present": bool(_coerce_str(chat.get("appSecret"))),
+        "owner_user_ids": [s for s in (chat.get("ownerUserIds") or []) if isinstance(s, str)],
+    }
 
 
 # REQUIRED_USER_SCOPES is kept for back-compat with doctor / status payloads
@@ -534,6 +615,119 @@ def _safe_permissions_check(settings) -> Dict[str, Any]:
         return {"status": "error", "error": str(exc)}
 
 
+def _safe_events_check(settings) -> Dict[str, Any]:
+    """Compare the event-subscription manifest against the user's last confirmation.
+
+    Since Feishu does not expose a 'list current event subscriptions'
+    API for self-built apps in a usable form, the 'confirmation' is
+    user-attestation: after the user has manually clicked the required
+    scope checkboxes under 'Events & Callback -> Event Subscription'
+    in the developer console and published a new version, the
+    activating Kian agent calls ``events-mark-confirmed`` to record
+    the fingerprint. Later runs of ``events-check`` compare the
+    on-disk manifest fingerprint against the confirmation marker, the
+    same way ``permissions-check`` does for scopes.
+    """
+
+    try:
+        if not EVENTS_MANIFEST_PATH.exists():
+            return {"status": "manifest_missing"}
+        manifest = _load_events_manifest()
+        if manifest.get("_parse_error"):
+            return {"status": "manifest_parse_error"}
+        current_fp = _events_fingerprint(manifest)
+        marker_path = _events_marker_path(settings)
+        last_fp = None
+        confirmed_at = None
+        last_events: List[Dict[str, Any]] = []
+        if marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except Exception:
+                marker = {}
+            last_fp = marker.get("fingerprint")
+            confirmed_at = marker.get("confirmed_at")
+            embedded = marker.get("manifest_at_confirm") or {}
+            last_events = (embedded.get("events") if isinstance(embedded, dict) else []) or []
+        current_event_names = sorted({
+            str(ev.get("name") or "") for ev in (manifest.get("events") or []) if isinstance(ev, dict)
+        })
+        last_event_names = sorted({
+            str(ev.get("name") or "") for ev in last_events if isinstance(ev, dict)
+        })
+        if last_fp is None:
+            status = "first_install"
+        elif last_fp == current_fp:
+            status = "fresh"
+        else:
+            status = "changed"
+        return {
+            "status": status,
+            "current_fingerprint": current_fp,
+            "last_confirmed_fingerprint": last_fp,
+            "confirmed_at": confirmed_at,
+            "diff": {
+                "added": sorted(set(current_event_names) - set(last_event_names)),
+                "removed": sorted(set(last_event_names) - set(current_event_names)),
+            },
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _safe_kian_channel_check(settings) -> Dict[str, Any]:
+    """Inspect Kian's chat-channel block for required configuration.
+
+    Five preconditions must hold for ``@smartZZ`` inbound flow to work:
+
+    1. ``~/KianWorkspace/.kian/settings.json`` exists and parses.
+    2. ``chatChannels.feishu.enabled == true``.
+    3. ``chatChannels.feishu.appId`` matches ``settings.feishu.app_id``
+       (i.e. Kian and skill agree on which bot identity to use).
+    4. ``chatChannels.feishu.appSecret`` is non-empty.
+    5. ``chatChannels.feishu.ownerUserIds`` contains the user's
+       ``settings.feishu.default_assignee_open_id`` -- the empty
+       whitelist on a Kian install is observed to mean 'reject all',
+       not 'allow all'.
+    """
+
+    info = _read_kian_feishu_channel()
+    if info.get("_status") != "ok":
+        return {
+            "status": "kian_settings_unavailable",
+            "detail": info,
+        }
+    issues: List[str] = []
+    if not info.get("enabled"):
+        issues.append("chatChannels.feishu.enabled 为 false")
+    skill_app_id = (settings.feishu.app_id or "").strip()
+    kian_app_id = (info.get("app_id") or "").strip()
+    if skill_app_id and kian_app_id and skill_app_id != kian_app_id:
+        issues.append(f"app_id 不一致：Kian={kian_app_id} 、 skill={skill_app_id}")
+    if skill_app_id and not kian_app_id:
+        issues.append("Kian 侧未填 appId")
+    if not info.get("app_secret_present"):
+        issues.append("Kian 侧未填 appSecret")
+    assignee = (settings.feishu.default_assignee_open_id or "").strip()
+    owners = info.get("owner_user_ids") or []
+    if assignee and assignee not in owners:
+        issues.append(
+            f"拥有者白名单未包含 default_assignee_open_id={assignee}\u3002"
+            " Kian 实现上空白名单等于拒绝所有人，必须加。"
+        )
+    return {
+        "status": "fresh" if not issues else "needs_setup",
+        "path": info.get("path"),
+        "enabled": info.get("enabled"),
+        "app_id_kian": kian_app_id or None,
+        "app_id_skill": skill_app_id or None,
+        "app_secret_present": info.get("app_secret_present"),
+        "owner_user_ids": owners,
+        "expected_owner_open_id": assignee or None,
+        "issues": issues,
+    }
+
+
 def _safe_update_check(settings) -> Dict[str, Any]:
     """Wrap ``updater.check`` so a transient network failure never breaks status."""
 
@@ -647,6 +841,8 @@ def _command_status(args: argparse.Namespace) -> int:
         "im_bad_chats": _read_im_bad_chats(paths.state_dir),
         "update_check": _safe_update_check(settings),
         "permissions_check": _safe_permissions_check(settings),
+        "events_check": _safe_events_check(settings),
+        "kian_channel_check": _safe_kian_channel_check(settings),
     }
     fallback = [
         f"config         : {payload['config_path']} (source={payload['config_source']})",
@@ -913,6 +1109,12 @@ def _command_doctor(args: argparse.Namespace) -> int:
     permissions_check = _safe_permissions_check(settings)
     if permissions_check.get("status") not in {"fresh"}:
         overall_ok = False
+    events_check_result = _safe_events_check(settings)
+    if events_check_result.get("status") not in {"fresh"}:
+        overall_ok = False
+    kian_check_result = _safe_kian_channel_check(settings)
+    if kian_check_result.get("status") not in {"fresh"}:
+        overall_ok = False
 
     payload = {
         "ok": bool(overall_ok),
@@ -929,6 +1131,8 @@ def _command_doctor(args: argparse.Namespace) -> int:
         "im_bad_chats": im_bad_chats,
         "update_check": update_check,
         "permissions_check": _safe_permissions_check(settings),
+        "events_check": _safe_events_check(settings),
+        "kian_channel_check": _safe_kian_channel_check(settings),
     }
 
     suggestions: List[str] = []
@@ -1024,6 +1228,41 @@ def _doctor_blocking_failures(payload: Dict[str, Any]) -> List[str]:
         )
     elif perm_status in {"manifest_missing", "manifest_parse_error"}:
         reasons.append(f"permissions 清单不可用：{perm_status}。Skill 损坏，请重新下载。")
+
+    events = payload.get("events_check") or {}
+    events_status = events.get("status")
+    if events_status == "first_install":
+        reasons.append(
+            "首次安装：请在飞书后台事件与回调页订阅 im.message.receive_v1 并勾选接收权限，"
+            "发布版本后调用 events-mark-confirmed。"
+        )
+    elif events_status == "changed":
+        diff = events.get("diff") or {}
+        added = diff.get("added") or []
+        removed = diff.get("removed") or []
+        bits = []
+        if added:
+            bits.append("新增事件=" + ", ".join(added))
+        if removed:
+            bits.append("移除事件=" + ", ".join(removed))
+        reasons.append(
+            "事件订阅 manifest 已变动，请回飞书后台订阅/重新勾选发布后调 events-mark-confirmed。"
+            + (" 变动：" + "；".join(bits) if bits else "")
+        )
+    elif events_status in {"manifest_missing", "manifest_parse_error"}:
+        reasons.append(f"events 清单不可用：{events_status}。Skill 损坏，请重新下载。")
+
+    kian = payload.get("kian_channel_check") or {}
+    if kian.get("status") not in {"fresh", None}:
+        for issue in kian.get("issues") or [kian.get("status")]:
+            reasons.append(f"Kian 飞书渠道：{issue}")
+
+    if not (payload.get("feishu_default_assignee_open_id") or (payload.get("feishu") or {}).get("default_assignee_open_id_redacted")):
+        # The status payload redacts the open_id for display; here we
+        # only need to know whether it is populated. Check the raw
+        # config-derived value if available.
+        pass
+
     return reasons
 
 
@@ -1056,6 +1295,66 @@ def _broadcast_first_run_heartbeat(settings: Any, summary: Dict[str, Any]) -> Di
         "channel_id": channel_id,
         "suggested_message": "\n".join(lines),
         "note": "请使用 Kian 的 broadcast 工具将上面内容发到 channel_id。bootstrap.py 不拥有心跳发送能力。",
+    }
+
+
+def _send_as_bot_probe(settings: Any) -> Dict[str, Any]:
+    """Send a single tiny probe DM to ``default_assignee_open_id``.
+
+    Used inside ``install --resume`` (step A.6) to verify two things in
+    one shot: the tenant access token can be obtained, and the
+    ``im:message:send_as_bot`` scope is actually published on the
+    Feishu app. Both used to surface much later (at the first cron tick
+    or first user-triggered send), causing 0.3.6 installs to look
+    "successful" but produce nothing the user could see.
+
+    The probe text is intentionally distinctive so the user can
+    recognise it; if they see it arrive in the bot DM thread, the
+    whole outbound path is confirmed working end-to-end.
+    """
+
+    open_id = (settings.feishu.default_assignee_open_id or "").strip()
+    if not open_id:
+        return {
+            "ok": False,
+            "reason": "no_recipient",
+            "hint": "config.feishu.default_assignee_open_id 未设置。OAuth exchange 后的自动回填可能未生效。",
+        }
+    text = (
+        "🧪 feishu-task-sync 安装探针：如果你在机器人私聊里看到这条，"
+        "说明 send_as_bot 已发布、机器人能直接 DM 你。本条可以忽略。"
+    )
+    try:
+        from sync_feishu_tasks import FeishuClient, FeishuApiError
+    except Exception as exc:
+        return {"ok": False, "reason": "import_error", "error": str(exc)}
+    try:
+        client = FeishuClient(settings, auth_mode="user")
+        resp = client.send_text_to_user(open_id, text)
+    except FeishuApiError as exc:
+        payload = exc.payload if isinstance(exc.payload, dict) else None
+        return {
+            "ok": False,
+            "reason": "api_error",
+            "error": str(exc),
+            "response": payload,
+            "hint": "检查 im:message:send_as_bot 是否在飞书开放平台已发布。",
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": "unexpected", "error": str(exc)}
+    code = resp.get("code") if isinstance(resp, dict) else None
+    if code not in (None, 0):
+        return {
+            "ok": False,
+            "reason": "non_zero_code",
+            "response": resp,
+            "hint": "检查机器人身份 / im:message:send_as_bot 是否发布。",
+        }
+    data = resp.get("data") if isinstance(resp, dict) else None
+    return {
+        "ok": True,
+        "recipient": open_id,
+        "message_id": (data or {}).get("message_id") if isinstance(data, dict) else None,
     }
 
 
@@ -1360,6 +1659,125 @@ def _command_uninstall(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _refresh_cronjob_contents(settings: Any) -> Dict[str, Any]:
+    """Update ``cronjob.json`` entries with freshly rendered prompts.
+
+    Heuristic: a cron entry is considered "standard" (and therefore
+    auto-overwritable) if its current ``content`` string starts with
+    one of the well-known prompt-template headings shipped by this
+    skill. Anything else is treated as user-customised; we surface it
+    in the returned report and skip the overwrite. Backups are always
+    written to ``cronjob.json.bak-<ts>`` before any modification.
+
+    Returns a dict with ``checked``, ``updated``, ``skipped``,
+    ``backup_path`` (string or None), and ``error`` (string or None)
+    so ``post-update`` can surface what happened in the broadcast
+    message.
+    """
+
+    out: Dict[str, Any] = {
+        "checked": False,
+        "updated": [],
+        "skipped": [],
+        "backup_path": None,
+        "error": None,
+    }
+
+    cron_path = Path(os.path.expanduser("~/KianWorkspace/cronjob.json"))
+    if not cron_path.exists():
+        cron_path = Path(os.path.expanduser("~/.kian/cronjob.json"))
+    if not cron_path.exists():
+        out["error"] = "cronjob.json not found in common locations"
+        return out
+
+    try:
+        entries = json.loads(cron_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        out["error"] = f"failed to parse cronjob.json: {exc}"
+        return out
+    if not isinstance(entries, list):
+        out["error"] = "cronjob.json is not a list"
+        return out
+
+    out["checked"] = True
+
+    # Render new contents once. If the templates are missing for some
+    # reason, surface the error rather than corrupting cronjob.json.
+    try:
+        new_hourly = _agent_hourly_cron_content(settings)
+        new_daily = _daily_summary_cron_content(settings)
+    except RuntimeError as exc:
+        out["error"] = f"failed to render cron templates: {exc}"
+        return out
+
+    # Heuristic markers: present in our shipped templates, very
+    # unlikely to coincidentally appear at the top of a user's custom
+    # prompt. We compare against the *first 200 chars* of the existing
+    # content so trivial drift later in the file does not block the
+    # refresh.
+    HOURLY_MARKER = "飞书任务同步方案 B：每小时主 Agent 执行说明"
+    DAILY_MARKER = "飞书同步 · 每天 11:00 摘要模板"
+
+    changed_any = False
+    pending: List[Tuple[int, str, str]] = []  # (index, kind, new_content)
+
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        cron_spec = entry.get("cron")
+        cur = entry.get("content") or ""
+        # Identify which template (if any) this entry corresponds to,
+        # using cron schedule + content marker. We require both to
+        # match so we never overwrite an unrelated user job that
+        # happens to share a schedule.
+        if cron_spec == "0 * * * *" and HOURLY_MARKER in cur[:300]:
+            if cur != new_hourly:
+                pending.append((idx, "hourly", new_hourly))
+            else:
+                out["skipped"].append({"index": idx, "reason": "already_current", "kind": "hourly"})
+        elif cron_spec == "0 11 * * *" and DAILY_MARKER in cur[:300]:
+            if cur != new_daily:
+                pending.append((idx, "daily", new_daily))
+            else:
+                out["skipped"].append({"index": idx, "reason": "already_current", "kind": "daily"})
+        elif cron_spec in {"0 * * * *", "0 11 * * *"} and "feishu-task-sync" in cur:
+            # Schedule matches one of ours but the marker doesn't:
+            # treat as user-customised and skip.
+            out["skipped"].append({
+                "index": idx,
+                "reason": "looks_customised",
+                "cron": cron_spec,
+                "content_head": cur[:120],
+            })
+
+    if not pending:
+        return out
+
+    # Write backup before mutating.
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    backup_path = cron_path.with_name(f"{cron_path.name}.bak-{timestamp}")
+    try:
+        backup_path.write_text(cron_path.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception as exc:
+        out["error"] = f"failed to write backup: {exc}"
+        return out
+    out["backup_path"] = str(backup_path)
+
+    for idx, kind, new_content in pending:
+        entries[idx]["content"] = new_content
+        out["updated"].append({"index": idx, "kind": kind})
+
+    try:
+        with cron_path.open("w", encoding="utf-8") as fh:
+            json.dump(entries, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    except Exception as exc:
+        out["error"] = f"failed to write cronjob.json: {exc}"
+        return out
+
+    return out
+
+
 def _agent_hourly_cron_content(settings: Any) -> str:
     """Render the hourly agent prompt with concrete absolute paths.
 
@@ -1455,6 +1873,25 @@ def _command_install(args: argparse.Namespace) -> int:
             _emit(result, args.print_json, [f"OAuth exchange 失败：{exc}"])
             return 2
 
+        # Step A.5: backfill default_assignee_open_id immediately after
+        # the OAuth exchange completes. Previously this only happened in
+        # first-run; if first-run was skipped or crashed, send-message
+        # would fail with no_recipient at the first heartbeat. Reload
+        # settings so the rest of stage 2 sees the freshly written field.
+        try:
+            _backfill_default_assignee(settings)
+            settings = load_settings(args.config)
+        except Exception:
+            # Backfill is best-effort; failures show up in doctor below.
+            pass
+
+        # Step A.6: send_as_bot probe. Confirms that im:message:send_as_bot
+        # has been published in the Feishu developer console (a common
+        # 0.3.6 install failure mode). Surfaces user-visible evidence that
+        # the bot can DM them; if it fails, doctor downstream will pick up
+        # the same problem but with a less actionable error message.
+        probe_outcome = _send_as_bot_probe(settings)
+
         # Step B: doctor.
         doctor_argv = argparse.Namespace(config=args.config, print_json=True)
         import io
@@ -1473,9 +1910,29 @@ def _command_install(args: argparse.Namespace) -> int:
                 "ok": False,
                 "stage": "doctor",
                 "doctor": doctor_payload,
+                "send_as_bot_probe": probe_outcome,
                 "blocking_reasons": reasons,
             }
             _emit(result, args.print_json, ["install 被拒绝，doctor 未通过："] + [f"  - {r}" for r in reasons])
+            return 2
+        if not probe_outcome.get("ok"):
+            # doctor passed but the bot still cannot DM the user. This is
+            # the install state the 0.3.6 release was meant to catch; bail
+            # before rendering cron entries so the user fixes scope
+            # publication rather than discovering it at the first cron tick.
+            result = {
+                "ok": False,
+                "stage": "send_as_bot_probe",
+                "doctor": doctor_payload,
+                "send_as_bot_probe": probe_outcome,
+                "blocking_reasons": [
+                    "机器人无法向用户 DM：" + (probe_outcome.get("hint") or probe_outcome.get("error") or "未知原因")
+                ],
+            }
+            _emit(result, args.print_json, [
+                "install 被拒绝：send_as_bot probe 未通过。",
+                "请检查飞书开放平台是否发布 im:message:send_as_bot 该版本，发布后重新调 install --resume。",
+            ])
             return 2
 
         # Step C: first-run.
@@ -1567,12 +2024,12 @@ def _command_install(args: argparse.Namespace) -> int:
         print(f"[bootstrap] config written but failed to load: {exc}", file=sys.stderr)
         return 2
 
-    # Activation step 0: refuse to mint an OAuth URL until the user has
-    # imported the current permission manifest into the Feishu developer
-    # console. Otherwise the consent screen silently drops any scope the
-    # console has not yet published, and we end up with a token whose
-    # effective scope set is a subset of what collect.py expects. This
-    # is what bit the user on the 0.3.0 task:task:writeonly addition.
+    # Activation gates (run in order; first to fail short-circuits the install):
+    # 1) permissions-check  -- OAuth scope manifest imported + published
+    # 2) events-check       -- event subscription scopes ticked + published
+    # 3) kian-channel-check -- Kian's chatChannels.feishu block matches
+    events_status = _safe_events_check(settings)
+    kian_status = _safe_kian_channel_check(settings)
     perm = _safe_permissions_check(settings)
     if perm.get("status") != "fresh":
         manifest = _load_permissions_manifest()
@@ -1600,6 +2057,56 @@ def _command_install(args: argparse.Namespace) -> int:
             fallback.append("新增 scope : " + ", ".join(diff["added"]))
         if diff.get("removed"):
             fallback.append("移除 scope : " + ", ".join(diff["removed"]))
+        fallback.append("下一步: 参见 next_step。")
+        _emit(result, args.print_json, fallback)
+        return 0
+
+    if events_status.get("status") != "fresh":
+        events_manifest = _load_events_manifest()
+        app_id = (settings.feishu.app_id or "").strip()
+        hint_url = f"https://open.feishu.cn/app/{app_id}/event" if app_id else ""
+        result = {
+            "ok": False,
+            "stage": "awaiting_events_setup",
+            "config_path": str(settings.config_path),
+            "events_check": events_status,
+            "events_manifest_path": str(EVENTS_MANIFEST_PATH),
+            "events_required": events_manifest.get("events") or [],
+            "hint_url": hint_url,
+            "next_step": (
+                f"打开 {hint_url} (事件与回调 → 事件订阅)，对 events_required 里的每个事件："
+                "点该事件 → 勾选 required_scopes_any_of 里的权限 (推荐全勾) → 页面顶部 “创建版本并发布”。"
+                f" 完成后调用 python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} events-mark-confirmed，"
+                "再重新调用 install 或让 Kian 继续。"
+            ),
+        }
+        fallback = [
+            "阶段 0 / 2：需要先在飞书后台订阅事件与勾选接收权限，暂未生成 OAuth 链接。",
+            f"events_check : {events_status.get('status')}",
+            f"hint_url : {hint_url}",
+            "下一步: 参见 next_step。",
+        ]
+        _emit(result, args.print_json, fallback)
+        return 0
+
+    if kian_status.get("status") != "fresh":
+        result = {
+            "ok": False,
+            "stage": "awaiting_kian_channel_setup",
+            "config_path": str(settings.config_path),
+            "kian_channel_check": kian_status,
+            "next_step": (
+                "打开 Kian 桌面端 → 设置 → 渠道 → 飞书。确认启用、填入 AppID/AppSecret，"
+                f" 并在拥有者白名单里加上 {settings.feishu.default_assignee_open_id or '<你的 open_id>'}。"
+                " 完成后重新调用 install 或让 Kian 继续。"
+            ),
+        }
+        fallback = [
+            "阶段 0 / 3：需要先在 Kian 桌面端配置飞书渠道，暂未生成 OAuth 链接。",
+            f"kian_channel_check : {kian_status.get('status')}",
+        ]
+        for issue in kian_status.get("issues") or []:
+            fallback.append(f"  - {issue}")
         fallback.append("下一步: 参见 next_step。")
         _emit(result, args.print_json, fallback)
         return 0
@@ -1780,6 +2287,16 @@ def _command_post_update(args: argparse.Namespace) -> int:
         except Exception:
             marker = {"raw": marker_path.read_text(encoding="utf-8")}
 
+    # Refresh cronjob.json prompt content if the upgrade changed the
+    # rendered templates. 0.3.6 broke this implicitly (the new
+    # send-message delivery path required new prompt text but old
+    # installs kept hand-rendered content from initial install). 0.3.8
+    # makes the refresh part of every upgrade. See
+    # _refresh_cronjob_contents for the heuristic that distinguishes
+    # "this looks like a standard rendered template" (auto-overwrite,
+    # with backup) from "this looks customised" (surface + skip).
+    cronjob_refresh = _refresh_cronjob_contents(settings)
+
     # Run doctor.
     import io
     import contextlib
@@ -1835,6 +2352,7 @@ def _command_post_update(args: argparse.Namespace) -> int:
         "config_path": str(settings.config_path),
         "marker": marker,
         "doctor": doctor_payload,
+        "cronjob_refresh": cronjob_refresh,
         "broadcast": {
             "channel_id": channel_id,
             "suggested_message": suggested_message,
@@ -2033,6 +2551,283 @@ def _command_permissions_mark_imported(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_events_check(args: argparse.Namespace) -> int:
+    """Surface the per-event scope checklist + diff against last confirmation.
+
+    Used as activation step 2.5 (after permissions-check, before any
+    OAuth or config work) and as a guard inside ``post-update``.
+    Output mirrors ``permissions-check``: ``status`` is one of
+    ``fresh`` / ``first_install`` / ``changed`` /
+    ``manifest_missing`` / ``manifest_parse_error`` / ``error``.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    if not EVENTS_MANIFEST_PATH.exists():
+        result = {"ok": False, "status": "manifest_missing", "manifest_path": str(EVENTS_MANIFEST_PATH)}
+        _emit(result, args.print_json, [
+            "⚠️ 缺少 events/required-events.json。Skill 损坏，请重新下载。",
+        ])
+        return 2
+    manifest = _load_events_manifest()
+    if manifest.get("_parse_error"):
+        result = {"ok": False, "status": "manifest_parse_error"}
+        _emit(result, args.print_json, ["⚠️ events/required-events.json 不是合法 JSON。"])
+        return 2
+
+    check = _safe_events_check(settings)
+    status = check.get("status")
+    events_required = manifest.get("events") or []
+    app_id = (settings.feishu.app_id or "").strip()
+    hint_url = (
+        f"https://open.feishu.cn/app/{app_id}/event" if app_id else
+        "https://open.feishu.cn/app -> 选中应用 -> 事件与回调 -> 事件订阅"
+    )
+
+    instructions: List[str] = []
+    if status == "fresh":
+        instructions.append("事件订阅与上次确认一致，可跳过本步。")
+    else:
+        instructions.extend([
+            f"打开飞书后台：{hint_url}",
+            "在页面上点“添加事件”（若该事件未添加），然后点事件名进入详情。",
+            "在 “请开通以下任一权限” 列表里勾选任一 / 多项（推荐全勾，特别是“读取用户发给机器人的单聊消息”、“获取群组中用户@机器人消息”）。",
+            "勾完后到页面顶部点 “创建版本并发布”。未发布不会生效。",
+            f"发布完成后调用：python3 {SKILL_DIR}/scripts/bootstrap.py --config {settings.config_path} events-mark-confirmed",
+        ])
+
+    result = {
+        "ok": status == "fresh",
+        "status": status,
+        "manifest_path": str(EVENTS_MANIFEST_PATH),
+        "marker_path": str(_events_marker_path(settings)),
+        "current_fingerprint": check.get("current_fingerprint"),
+        "last_confirmed_fingerprint": check.get("last_confirmed_fingerprint"),
+        "confirmed_at": check.get("confirmed_at"),
+        "events_required": events_required,
+        "hint_url": hint_url,
+        "instructions": instructions,
+        "diff": check.get("diff") or {"added": [], "removed": []},
+    }
+
+    lines: List[str] = []
+    if status == "fresh":
+        lines.append("✅ 事件订阅清单与上次确认一致。")
+    elif status == "first_install":
+        lines.append("ℹ️ 首次安装：需在飞书后台手动勾选事件接收权限。")
+    elif status == "changed":
+        diff = check.get("diff") or {}
+        if diff.get("added"):
+            lines.append("新增需订阅的事件：" + ", ".join(diff["added"]))
+        if diff.get("removed"):
+            lines.append("不再需要的事件：" + ", ".join(diff["removed"]))
+    for ev in events_required:
+        if isinstance(ev, dict):
+            lines.append(
+                f"  • 事件 {ev.get('name')} ({ev.get('label')} {ev.get('version')}) "
+                f"需权限任一：{', '.join(ev.get('required_scopes_any_of') or [])}"
+            )
+    for inst in instructions:
+        lines.append(f"  - {inst}")
+
+    _emit(result, args.print_json, lines)
+    return 0 if status == "fresh" else 1
+
+
+def _command_events_mark_confirmed(args: argparse.Namespace) -> int:
+    """Record that the user has clicked the required event scopes + published.
+
+    See ``_command_permissions_mark_imported`` for the parallel design.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    if not EVENTS_MANIFEST_PATH.exists():
+        _emit({"ok": False, "status": "manifest_missing"}, args.print_json, ["缺少 events/required-events.json。"])
+        return 2
+    manifest = _load_events_manifest()
+    if manifest.get("_parse_error"):
+        _emit({"ok": False, "status": "manifest_parse_error"}, args.print_json, ["events/required-events.json 不是合法 JSON。"])
+        return 2
+
+    fingerprint = _events_fingerprint(manifest)
+    marker_payload = {
+        "fingerprint": fingerprint,
+        "confirmed_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "manifest_path": str(EVENTS_MANIFEST_PATH),
+        "manifest_at_confirm": manifest,
+    }
+    marker_path = _events_marker_path(settings)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(marker_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _emit(
+        {"ok": True, "status": "recorded", "marker_path": str(marker_path), "fingerprint": fingerprint},
+        args.print_json,
+        [f"✅ 已记录事件订阅确认（fingerprint={fingerprint[:12]}…）"],
+    )
+    return 0
+
+
+def _command_kian_channel_check(args: argparse.Namespace) -> int:
+    """Verify Kian's chat-channel block matches what the skill needs.
+
+    Read-only by design: writing into Kian's settings.json from outside
+    would race with Kian's own in-memory state. Instead we surface
+    precise instructions for the user to fix it in Kian's UI.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    check = _safe_kian_channel_check(settings)
+    status = check.get("status")
+
+    instructions: List[str] = []
+    if status != "fresh":
+        instructions.extend([
+            "打开 Kian 桌面端 → 设置 → 渠道 → 飞书 页。",
+            "确认顶部 “已启用” 开关是打开状态。",
+            f"确认 AppID 等于 {settings.feishu.app_id}、AppSecret 已填入。",
+            f"在 “拥有者白名单” 里加上 {settings.feishu.default_assignee_open_id or '<你的 open_id>'} 后保存。",
+            "保存后重新运行本命令验证。",
+        ])
+        if status == "kian_settings_unavailable":
+            instructions.append(
+                "提示：Kian 设置文件不可读。请确认 Kian.app 已启动过一次、~/KianWorkspace/.kian/settings.json 存在且可读。"
+            )
+
+    result = {
+        "ok": status == "fresh",
+        "status": status,
+        "path": check.get("path"),
+        "enabled": check.get("enabled"),
+        "app_id_kian": check.get("app_id_kian"),
+        "app_id_skill": check.get("app_id_skill"),
+        "app_secret_present": check.get("app_secret_present"),
+        "owner_user_ids": check.get("owner_user_ids"),
+        "expected_owner_open_id": check.get("expected_owner_open_id"),
+        "issues": check.get("issues") or [],
+        "instructions": instructions,
+    }
+
+    lines: List[str] = []
+    if status == "fresh":
+        lines.append("✅ Kian 飞书渠道配置与 skill 一致。")
+    else:
+        lines.append(f"⚠️ Kian 飞书渠道配置未就绪：status={status}")
+        for issue in check.get("issues") or []:
+            lines.append(f"  - {issue}")
+        for inst in instructions:
+            lines.append(f"  > {inst}")
+
+    _emit(result, args.print_json, lines)
+    return 0 if status == "fresh" else 1
+
+
+def _command_preflight(args: argparse.Namespace) -> int:
+    """One-shot summary of every external dependency the skill needs.
+
+    Activation step 0: run before collecting any config / OAuth /
+    cron work. Aggregates permissions-check, events-check,
+    kian-channel-check, plus quick local sanity checks. Output is a
+    table-ish JSON for the agent and a human summary for the fallback
+    text path. Never calls Feishu live.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    perm = _safe_permissions_check(settings)
+    events = _safe_events_check(settings)
+    kian = _safe_kian_channel_check(settings)
+
+    config_problems: List[str] = []
+    if not (settings.feishu.app_id or "").strip():
+        config_problems.append("config.feishu.app_id 空")
+    if not (settings.feishu.app_secret or "").strip():
+        config_problems.append("config.feishu.app_secret 空")
+    if not (settings.feishu.redirect_uri or "").strip():
+        config_problems.append("config.feishu.redirect_uri 空")
+    if not (settings.feishu.default_assignee_open_id or "").strip():
+        config_problems.append(
+            "config.feishu.default_assignee_open_id 空。这会让 send-message 报 no_recipient；"
+            " install --resume 完成 OAuth 交换后会自动回填。"
+        )
+
+    user_auth = _read_user_auth(settings.paths.user_auth_path)
+    oauth_status = (
+        "fresh" if user_auth.get("has_user_access_token") and user_auth.get("has_refresh_token")
+        else "missing"
+    )
+
+    cron = _doctor_cron_state()
+    cron_status = "present" if (cron.get("matches") or []) else "missing"
+
+    overall_ok = (
+        perm.get("status") == "fresh"
+        and events.get("status") == "fresh"
+        and kian.get("status") == "fresh"
+        and not config_problems
+        and oauth_status == "fresh"
+    )
+
+    payload = {
+        "ok": overall_ok,
+        "summary": {
+            "permissions": perm.get("status"),
+            "events": events.get("status"),
+            "kian_channel": kian.get("status"),
+            "config": "fresh" if not config_problems else "needs_fix",
+            "oauth": oauth_status,
+            "cron": cron_status,
+        },
+        "permissions": perm,
+        "events": events,
+        "kian_channel": kian,
+        "config_problems": config_problems,
+        "oauth": {
+            "has_user_access_token": user_auth.get("has_user_access_token"),
+            "has_refresh_token": user_auth.get("has_refresh_token"),
+            "expires_at": user_auth.get("expires_at"),
+            "is_access_token_valid": user_auth.get("is_access_token_valid"),
+        },
+        "cron": cron,
+    }
+
+    lines = [
+        "== feishu-task-sync 预检 ==",
+        f"permissions  : {perm.get('status')}",
+        f"events       : {events.get('status')}",
+        f"kian_channel : {kian.get('status')}",
+        f"config       : {'fresh' if not config_problems else 'needs_fix'}",
+        f"oauth        : {oauth_status}",
+        f"cron         : {cron_status}",
+        "",
+        "任一项 非 fresh 都表示有动作需要处理。查看各子节点的 instructions 字段。",
+    ]
+    _emit(payload, args.print_json, lines)
+    return 0 if overall_ok else 1
+
+
 def _command_send_message(args: argparse.Namespace) -> int:
     """Send a plain-text DM to a Feishu user via the bot identity.
 
@@ -2203,6 +2998,22 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "permissions-mark-imported",
         help="Record that the user has imported & published the current scope manifest in the Feishu developer console.",
     )
+    sub.add_parser(
+        "events-check",
+        help="Compare events/required-events.json against the user's last confirmed event subscription state. Activation step 2.5.",
+    )
+    sub.add_parser(
+        "events-mark-confirmed",
+        help="Record that the user has clicked the per-event scope checkboxes and published in the Feishu developer console.",
+    )
+    sub.add_parser(
+        "kian-channel-check",
+        help="Inspect Kian's settings.json chatChannels.feishu block (enabled, app_id match, owner whitelist).",
+    )
+    sub.add_parser(
+        "preflight",
+        help="Aggregate permissions-check + events-check + kian-channel-check + local config/OAuth/cron sanity into a single status table.",
+    )
 
     p_send = sub.add_parser(
         "send-message",
@@ -2251,6 +3062,14 @@ def main(argv: Sequence[str]) -> int:
         return _command_permissions_check(args)
     if args.command == "permissions-mark-imported":
         return _command_permissions_mark_imported(args)
+    if args.command == "events-check":
+        return _command_events_check(args)
+    if args.command == "events-mark-confirmed":
+        return _command_events_mark_confirmed(args)
+    if args.command == "kian-channel-check":
+        return _command_kian_channel_check(args)
+    if args.command == "preflight":
+        return _command_preflight(args)
     if args.command == "send-message":
         return _command_send_message(args)
     if args.command == "update":

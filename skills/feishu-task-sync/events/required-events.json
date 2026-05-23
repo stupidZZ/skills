@@ -1,0 +1,15 @@
+{
+  "events": [
+    {
+      "name": "im.message.receive_v1",
+      "label": "接收消息",
+      "version": "v2.0",
+      "required_scopes_any_of": [
+        "获取群组中用户@机器人消息",
+        "读取用户发给机器人的单聊消息",
+        "获取群组中其他机器人和用户@当前机器人的消息"
+      ],
+      "rationale": "Kian 内置 Feishu chat channel 通过 im.message.receive_v1 长连接接管入站消息。该事件不订阅、对应 scope 不勾选，私聊 / @机器人都不会触发主 Agent 响应。"
+    }
+  ]
+}

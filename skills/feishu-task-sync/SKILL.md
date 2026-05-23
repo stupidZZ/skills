@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.7
+version: 0.3.8
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -53,7 +53,162 @@ trigger_phrases:
 - 用户提到 “装好这个 Skill 但不知道怎么开始 / 怎么用”。
 - Agent 加载到本 Skill 且检测到 `<SKILL_DIR>/config.json` 不存在。
 
-引导式安装一共走 8 步，Agent 必须按顺序执行：
+引导式安装一共 3 段，**每段完成后一性进下段，不要逆向**：
+
+- 段 1（外部依赖自检）：调 `preflight` 一次看到底哪些外部依赖需要用户去配。`preflight`
+  下的任一项 `status != "fresh"` 都会导贴一段精确指引，贴给用户。用户完成后重跑 preflight，
+  全部 fresh 才进段 2。
+- 段 2（OAuth + Stage1/Stage2 全自动）：只问用户 3 个字段 + 一次授权浏览器。后面的
+  doctor / first-run / send_as_bot probe / 渲染 cron entries 全部由 `install` 命令一气走完。
+- 段 3（写 cron + 后台 Agent + 首跳心跳）：拿 stage=`ready` 返回的 `cron_entries`
+  写入 `cronjob.json` + 创建/复用后台 Agent，最后调 `send-message` 发“装好了 🎉”。
+
+## 段 1：外部依赖自检
+
+```bash
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json preflight
+```
+
+该命令返回一份总览：
+
+```json
+{
+  "ok": false,
+  "summary": {
+    "permissions": "first_install | fresh | changed | manifest_missing | error",
+    "events":      "first_install | fresh | changed | manifest_missing | error",
+    "kian_channel": "fresh | needs_setup | kian_settings_unavailable",
+    "config":       "fresh | needs_fix",
+    "oauth":        "fresh | missing",
+    "cron":         "present | missing"
+  },
+  "permissions": {...},
+  "events":      {...},
+  "kian_channel":{...},
+  ...
+}
+```
+
+逐项处理，任一项非 fresh 就按下面的指引推给用户；不要跳过：
+
+### 1.1 permissions
+
+- `fresh` → 跳过本项。**不要重复贴** "去飞书后台导入权限"，那会重复劳动。
+- `first_install` → 完整贴 `permissions/required-scopes.json` + 指引“飞书开放平台 → 权限管理 → 批量导入 → 创建版本并发布”。顺便提醒在同页面的"安全设置 → 重定向 URL"里加 `http://localhost:8765/feishu/oauth/callback`。
+- `changed` → 只贴 `diff.added` / `diff.removed`，重走同样的导入 + 发布。
+- 用户完成后调：
+  ```bash
+  python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json permissions-mark-imported
+  ```
+
+### 1.2 events
+
+飞书不提供“批量导入事件订阅”，必须用户手动点选。严重性：该项不过机器人收不到任何事件，以后用户 @smartZZ 不会有反应。
+
+- `fresh` → 跳过本项。
+- `first_install` / `changed` → 贴返回中的 `hint_url`（形式为 `https://open.feishu.cn/app/<app_id>/event`）+ `events_required` 里每个事件需勾选的中文权限 label，推荐用户全勾。勾完后必须顶部“创建版本并发布”。
+- 用户完成后调：
+  ```bash
+  python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json events-mark-confirmed
+  ```
+
+### 1.3 kian_channel
+
+需要 Kian 桌面端设置里的“渠道 → 飞书”页与 skill 一致。检查项：
+
+- `chatChannels.feishu.enabled = true`
+- `chatChannels.feishu.appId = settings.feishu.app_id`
+- `chatChannels.feishu.appSecret` 非空
+- `chatChannels.feishu.ownerUserIds` 包含 `settings.feishu.default_assignee_open_id`
+
+本检查只读不写。发现不一致时，贴返回 JSON 里的 `instructions`，让用户去 Kian UI 里修。不要直接写 `~/KianWorkspace/.kian/settings.json`，会和 Kian 进程内部状态打架。
+
+### 1.4 config / oauth / cron
+
+首次安装这三项都默认是 `needs_fix` / `missing` / `missing`，是正常的；段 2 / 段 3 会裥补。只要 permissions / events / kian_channel 都 `fresh`，就可以进段 2。
+
+---
+
+## 段 2：主安装流程
+
+收集 3 个字段后一口气跑完 OAuth + doctor + first-run + send_as_bot probe + cron 渲染。
+
+### 2.1 收集 3 个字段（缺一不可，必须问用户要，不可猜测）
+
+- `app_id`（`cli_xxx`）
+- `app_secret`
+- `redirect_uri`（与段 1 填入飞书后台的值完全一致）
+
+`broadcast.*` / `default_assignee_open_id` 不需要问：broadcast 0.3.6+ 已不参与交付；default_assignee_open_id 会在 OAuth exchange 后自动回填。
+
+### 2.2 Stage 1（写 config + 发 OAuth 链接）
+
+拼下面的 JSON，喂给：
+
+```bash
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --input -
+```
+
+```json
+{
+  "feishu": {
+    "app_id": "...",
+    "app_secret": "...",
+    "redirect_uri": "http://localhost:8765/feishu/oauth/callback"
+  },
+  "broadcast": {
+    "heartbeat_channel_id": null,
+    "daily_summary_channel_id": null
+  }
+}
+```
+
+根据返回的 `stage` 分支：
+
+- `awaiting_oauth_callback` → 把 `auth_url` 贴给用户，让他授权后贴回完整回调 URL。进 2.3。
+- `awaiting_permissions_import` → 说明段 1 的 `permissions-mark-imported` 还没跑。顺着 `next_step` 补上后重跑 stage 1（带 `--force` 重写 config）。
+- `awaiting_events_setup` → 同上，用户未勾选 / 未发布事件。贴 `hint_url` + `next_step`。
+- `awaiting_kian_channel_setup` → 同上，Kian 桌面端设置未完备。贴 `next_step`。
+
+### 2.3 Stage 2（exchange + doctor + first-run + cron 渲染）
+
+```bash
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json install --resume --redirect-url '<完整回调 URL>'
+```
+
+该命令顺序跑：
+
+1. **exchange code** → 写 `state/user-auth.json`
+2. **回填** `default_assignee_open_id`（推进到 OAuth exchange 之后，以前只在 first-run 跳过是会漏）
+3. **send_as_bot probe** → 向用户 DM 一条测试文本，验证 `im:message:send_as_bot` 已发布 + 机器人能私聊你。失败时返回 `stage="send_as_bot_probe"` + hint，请用户去后台发布后重试。
+4. **doctor** 全套健康检查
+5. **first-run** 空 Todo 探针，推进 sync-cursor
+6. **渲染** 两条 cron `content`
+
+任一步失败都会返回明确的 `stage` + `blocking_reasons` + hint。Agent 顺着那份 JSON 推动用户修复后重跑本命令。
+
+---
+
+## 段 3：后台 Agent + cron + 首跳心跳
+
+Agent 收到 stage=`ready` 的 JSON 后：
+
+1. **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台助手”（或类似职责的 background-only Agent），用 `CreateAgent` 创建一个，description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发对话”。**严禁** 把 `targetAgentId` 设为用户主开发 Agent。
+2. **写 cron**：把 `cron_entries` 中两条写入 Kian `cronjob.json`，`targetAgentId` 填上面选中/创建的后台 Agent ID，`status: "active"`。
+3. **首跳心跳**：调用（多行推荐 stdin）：
+   ```bash
+   cat <<\READY | python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message
+   <broadcast.suggested_message 内容>
+   READY
+   ```
+   机器人会以私聊发给 `default_assignee_open_id`。这是用户得知“安装成功”的唯一信号，不能漏；也不要退回 Kian `broadcast` 工具。
+4. 最后告诉用户：“cron 已生效，下一个整点会自动跑。现在可以试试在飞书私聊 smartZZ ”
+
+---
+
+## 旧版 8 步流程（0.3.7 及以前）
+
+> 以下仅作对照，Agent 不要走。有人在老对话里引用过 “8 步” 这个叫法，这里保留原文以免误会。
 
 1. **检查 Skill 安装路径**：在用户机器上找到 Skill 的真实绝对路径
    `<SKILL_DIR>`（典型为 `~/KianWorkspace/.kian/skills/installed/feishu-task-sync/`

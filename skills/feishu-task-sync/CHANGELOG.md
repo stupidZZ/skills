@@ -3,6 +3,152 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.8 – install-time self-check overhaul + post-update cronjob refresh
+
+Motivation. The 0.2.3 -> 0.3.7 journey exposed a series of
+silent-failure modes during install that all shared the same shape:
+an external precondition (Feishu console, Kian settings, cronjob.json
+rendered prompt) was wrong, the skill had no idea, and the user only
+found out hours later when the first cron tick produced confused
+output. 0.3.8 closes those gaps systematically.
+
+New install gates (all read-only; never write to Feishu or Kian):
+
+* **`events-check`** + **`events-mark-confirmed`** subcommands. The
+  Feishu developer console does not expose a batch-import for event
+  subscriptions (only for OAuth scopes), so we cannot automate the
+  per-event scope checkbox flow. Instead the skill ships
+  ``events/required-events.json`` declaring which events must be
+  subscribed and which Chinese-label scopes the user must tick for
+  each. ``events-check`` compares its SHA256 fingerprint against
+  ``state/events-confirmed.json``; ``events-mark-confirmed`` records
+  it after the user manually clicks + publishes. The model is
+  intentionally identical to ``permissions-check`` /
+  ``permissions-mark-imported`` so agents can use the same dispatch
+  pattern.
+
+* **`kian-channel-check`** subcommand. Reads
+  ``~/KianWorkspace/.kian/settings.json`` and inspects
+  ``chatChannels.feishu``: must be ``enabled``, ``appId`` matching
+  the skill's ``feishu.app_id``, ``appSecret`` non-empty, and
+  ``ownerUserIds`` containing ``settings.feishu.default_assignee_open_id``.
+  The empty whitelist case is observed in practice to mean "reject
+  all" on Kian's side, not "allow all", so we report it as
+  ``needs_setup`` and give precise instructions for the user to fix
+  in Kian's UI (we never write into Kian's settings.json from outside,
+  because it would race with Kian's in-memory state).
+
+* **`preflight`** subcommand. Aggregates permissions-check +
+  events-check + kian-channel-check + local config / OAuth / cron
+  sanity into a single status table. Activation step 0 calls this
+  once and surfaces the entire to-do list to the user upfront, so
+  they do the external setup in one pass rather than getting trickled
+  errors over the course of install.
+
+Install flow changes that consume the new checks:
+
+* ``bootstrap.py install`` stage 1 now gates on all three external
+  checks. Any non-fresh status returns a structured payload with a
+  fixed ``stage`` name (``awaiting_permissions_import`` /
+  ``awaiting_events_setup`` / ``awaiting_kian_channel_setup`` /
+  ``awaiting_oauth_callback``), per-issue ``next_step``, and an
+  ``hint_url`` direct-link to the Feishu console page where the user
+  needs to act. Agents read ``stage`` and route deterministically.
+
+* ``bootstrap.py install --resume`` (stage 2) gains two automatic
+  steps right after the OAuth exchange:
+  * **Backfill** ``default_assignee_open_id`` immediately, then
+    ``load_settings`` again. Previously this was only done inside
+    ``first-run``; if first-run was skipped or interrupted, the
+    field stayed null and the first ``send-message`` call would fail
+    with ``no_recipient``. The 0.3.7 install that the user just did
+    hit exactly this bug.
+  * **send_as_bot probe**: post a single user-visible test DM to the
+    user (``🧪 feishu-task-sync 安装探针...``). This catches a
+    common 0.3.6+ failure mode ahead of doctor: the
+    ``im:message:send_as_bot`` tenant scope is in the manifest but
+    has not been published yet on the Feishu app, so heartbeats
+    would silently fail at the first cron tick. The probe message
+    also gives the user immediate visual confirmation that the bot
+    can DM them.
+  Both new steps surface in the install result as
+  ``send_as_bot_probe`` and ``blocking_reasons`` so the agent reports
+  them precisely.
+
+* Doctor and status payloads now include ``events_check`` and
+  ``kian_channel_check`` alongside the existing ``permissions_check``.
+  Doctor's ``overall_ok`` flips to false when any external check is
+  non-fresh, so ``install --resume``, ``post-update``, and
+  ``reauth`` all gate on the same conditions.
+  ``_doctor_blocking_failures`` returns specific Chinese reasons for
+  events / kian-channel problems with the exact diff / issue list.
+
+post-update reliability fix:
+
+* ``post-update`` now refreshes ``cronjob.json`` automatically when
+  the upgraded prompt templates differ from what is currently
+  installed. Previously a release like 0.3.6 (which changed the
+  delivery path from Kian broadcast tool to ``send-message``) would
+  upgrade the skill files but leave ``cronjob.json`` pointed at the
+  *old* prompt content rendered at original install time, silently
+  reverting the upgrade for cron-driven flows. The new
+  ``_refresh_cronjob_contents`` helper:
+  - identifies entries whose schedule matches our two cron slots
+    (``0 * * * *`` / ``0 11 * * *``) **and** whose content head
+    starts with our shipped template heading,
+  - re-renders ``_agent_hourly_cron_content`` /
+    ``_daily_summary_cron_content`` for the upgrade's settings,
+  - writes a ``cronjob.json.bak-<ts>`` backup before any change,
+  - swaps in the new content,
+  - records ``updated`` / ``skipped`` / ``backup_path`` /
+    ``error`` in the post-update report.
+  User-customised cron content (no heading match) is treated as
+  out-of-scope and only reported in ``skipped`` with a content head
+  preview, never overwritten.
+
+Minor:
+
+* ``broadcast.heartbeat_channel_id`` config field was already
+  non-required since 0.3.6; 0.3.8 also tolerates ``null`` cleanly
+  in the schema check.
+* All new subcommands accept ``--print-json`` and emit the standard
+  ``{ok, status, ...}`` envelope, consistent with the rest of
+  bootstrap.py.
+
+SKILL.md activation rules rewritten from 8 sequential steps into a
+3-segment flow: external self-check (preflight + per-area
+remediation) -> main install (3 fields + OAuth + auto everything
+else) -> cron + bg agent + first heartbeat. The old 8-step text is
+retained at the bottom of the doc for reference only; agents must
+follow the new 3-segment instructions.
+
+Migration:
+  - Existing 0.3.7 installs: ``update apply`` -> ``post-update``.
+    The new ``post-update`` will refresh ``cronjob.json`` content
+    in-place if applicable, write a timestamped backup, and surface
+    the result in the broadcast notice. ``permissions-check`` and
+    ``events-check`` will report ``first_install`` on the new
+    ``events`` manifest -- the user needs to confirm they have
+    already manually ticked the event scopes (which 0.3.7 made them
+    do by hand) and then call ``events-mark-confirmed`` once to
+    record the fingerprint.
+
+Bumped SKILL.md to 0.3.8; top-level README skill row to 0.3.8.
+
+Verified locally:
+  - ``preflight`` against the live 0.3.7 install reports the correct
+    statuses (permissions=fresh after import, events=first_install
+    on new manifest, kian_channel=fresh after the owner whitelist
+    was populated).
+  - ``events-check`` returns ``hint_url`` pointing at the right
+    cli_a956… event page, lists the required scopes in Chinese as
+    they appear in the Feishu UI.
+  - ``kian-channel-check`` correctly identifies a missing
+    ``ownerUserIds`` entry and a mismatched ``appId``.
+  - The cron refresh path was already exercised manually for the
+    user's machine after the 0.3.6 -> 0.3.7 upgrade; 0.3.8 turns
+    that into a permanent automatic behaviour.
+
 ## 0.3.7 – fix invalid scope identifiers in the 0.3.6 tenant manifest
 
 The 0.3.6 ``permissions/required-scopes.json`` listed two identifiers
