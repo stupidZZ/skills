@@ -39,6 +39,8 @@ class CreateResult:
     feishu_task_id: Optional[str] = None
     error: Optional[str] = None
     response: Optional[Dict[str, Any]] = None
+    assignee_visible: Optional[bool] = None
+    visibility_detail: Optional[Dict[str, Any]] = None
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -367,16 +369,87 @@ def command_create(args: argparse.Namespace) -> int:
             continue
         try:
             task_description = build_task_description(todo)
-            create_resp = client.create_task(title, description=task_description)
+            # Atomic create-with-member: pass the assignee in the POST
+            # body. The previous "create, then add_members" two-call
+            # shape was producing orphan tasks because (a) the second
+            # call was made with user_id_type implicitly defaulting to
+            # the Feishu uid format while we were sending an open_id,
+            # and (b) nobody checked code==0 on the add_members
+            # response, so a silent failure was being recorded as
+            # ``created+assigned`` in the heartbeat. See 0.3.5 changelog
+            # for the full story.
+            create_resp = client.create_task(
+                title,
+                description=task_description,
+                assignee_open_id=assignee_user_id or None,
+            )
             task = ((create_resp.get("data") or {}).get("task") or {})
             task_guid = task.get("guid") or create_resp.get("task_guid")
             task_id = task.get("task_id") or create_resp.get("task_id")
-            status = "created"
+            create_code = create_resp.get("code")
             response_bundle: Dict[str, Any] = {"create": create_resp}
+
+            if create_code not in (None, 0):
+                # The Feishu task API can return HTTP 200 with a
+                # non-zero ``code`` payload for soft failures. Treat
+                # those exactly like an exception path.
+                raise FeishuApiError(
+                    f"create_task returned code={create_code}: {create_resp.get('msg')}",
+                    create_resp,
+                )
+
+            assignee_visible: Optional[bool] = None
+            visibility_detail: Dict[str, Any] = {}
             if assignee_user_id and task_guid:
-                assign_resp = client.add_assignee(str(task_guid), assignee_user_id)
-                response_bundle["assign"] = assign_resp
-                status = "created+assigned"
+                # Verify visibility by reading the task back. If the
+                # members list does not contain the intended open_id
+                # the task was accepted by the API but will not appear
+                # in the user's task list -- the "created but invisible"
+                # bug 0.3.5 is built to eliminate.
+                try:
+                    verify_resp = client.get_task(str(task_guid))
+                    response_bundle["verify"] = verify_resp
+                    verify_task = ((verify_resp.get("data") or {}).get("task") or {})
+                    members = verify_task.get("members") or []
+                    member_ids = [
+                        str(m.get("id") or m.get("open_id") or "")
+                        for m in members
+                        if isinstance(m, dict)
+                    ]
+                    assignee_visible = assignee_user_id in member_ids
+                    visibility_detail = {
+                        "expected_open_id": assignee_user_id,
+                        "members_found": member_ids,
+                        "verify_code": verify_resp.get("code"),
+                    }
+                except FeishuApiError as verify_exc:
+                    visibility_detail = {
+                        "expected_open_id": assignee_user_id,
+                        "verify_error": str(verify_exc),
+                        "verify_response": getattr(verify_exc, "payload", None),
+                    }
+                    assignee_visible = None  # unknown; surfaced by report
+
+            if assignee_visible is True:
+                status = "created+visible"
+            elif assignee_visible is False:
+                # Task was created but is invisible to the user. This
+                # is a hard failure for our purposes: the whole point
+                # of the skill is to make tasks the user actually sees.
+                # We mark it as failed (with the guid so the user can
+                # still find it via the API) and let the heartbeat
+                # banner surface the diagnostic.
+                status = "created-but-invisible"
+            elif assignee_user_id and assignee_visible is None:
+                # Verification call itself failed -- typically a
+                # transient network issue. Lean conservative and call
+                # it visibility-unknown rather than created+visible.
+                status = "created-visibility-unknown"
+            else:
+                # No assignee configured at all. The task exists but is
+                # an orphan by design.
+                status = "created-no-assignee"
+
             result = CreateResult(
                 fingerprint=fingerprint,
                 title=title,
@@ -384,6 +457,8 @@ def command_create(args: argparse.Namespace) -> int:
                 feishu_task_guid=str(task_guid) if task_guid else None,
                 feishu_task_id=str(task_id) if task_id else None,
                 response=response_bundle,
+                assignee_visible=assignee_visible,
+                visibility_detail=visibility_detail or None,
             )
         except Exception as exc:
             payload_error = exc.payload if isinstance(exc, FeishuApiError) else None
@@ -406,8 +481,24 @@ def command_create(args: argparse.Namespace) -> int:
     state["processed"] = processed
     state["updated_at"] = now.isoformat()
     JsonStore.save(state_path, state)
-    created_count = sum(1 for item in results if item.status.startswith("created"))
-    failed_count = sum(1 for item in results if item.status == "failed")
+    # ``created_count`` now means "task is in the user's task list" --
+    # i.e. the assignee was correctly attached and verification passed.
+    # A task that returned code=0 from POST but whose verification
+    # showed the assignee missing from ``members`` is counted as a
+    # failure, because the user would never see it otherwise.
+    visible_count = sum(
+        1 for item in results if item.status in {"created+visible", "created-no-assignee"}
+    )
+    invisible_count = sum(1 for item in results if item.status == "created-but-invisible")
+    visibility_unknown_count = sum(
+        1 for item in results if item.status == "created-visibility-unknown"
+    )
+    explicit_failed_count = sum(1 for item in results if item.status == "failed")
+    # Treat invisible as a failure so the cursor + cron retry next tick;
+    # "unknown" is a soft warning (verification GET itself crashed) and
+    # does not block the cursor.
+    failed_count = explicit_failed_count + invisible_count
+    created_count = visible_count
     cursor_status = "failed" if failed_count else "success"
     cursor = None
     if args.mark_success_cursor:
@@ -422,6 +513,8 @@ def command_create(args: argparse.Namespace) -> int:
         "assignee_user_id": assignee_user_id,
         "todo_count": len(todos),
         "created_count": created_count,
+        "created_but_invisible_count": invisible_count,
+        "visibility_unknown_count": visibility_unknown_count,
         "skipped_count": len(skipped),
         "failed_count": failed_count,
         "removed_by_gc": removed_by_gc,
@@ -441,7 +534,13 @@ def command_create(args: argparse.Namespace) -> int:
     save_report(report_json, report_md, report)
     log_line(
         cron_log,
-        f"feishu_tasks create input={input_path} todos={len(todos)} created={created_count} skipped={len(skipped)} failed={failed_count} cursor_status={cursor_status} cursor_marked={bool(args.mark_success_cursor)}",
+        (
+            f"feishu_tasks create input={input_path} todos={len(todos)} "
+            f"created={created_count} invisible={invisible_count} "
+            f"unknown={visibility_unknown_count} skipped={len(skipped)} "
+            f"failed={explicit_failed_count} cursor_status={cursor_status} "
+            f"cursor_marked={bool(args.mark_success_cursor)}"
+        ),
     )
     if args.print_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

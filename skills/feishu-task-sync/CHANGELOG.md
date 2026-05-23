@@ -3,6 +3,101 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.5 – atomic create-with-assignee + post-create visibility verification
+
+User report: the 0.3.4 daily summary reported two tasks as
+successfully created (``t106804`` and ``t106806`` with valid GUIDs)
+but neither appeared in the user's Feishu task list. Reading back the
+two GUIDs showed they existed on the server but their ``members``
+lists were empty -- the tasks were orphaned, accessible only by GUID.
+
+Root causes (two of them, interacting):
+
+1. ``create_task`` did not pass the assignee in the POST body. The
+   workflow was ``POST /tasks`` followed by ``POST /tasks/{guid}/add_members``.
+2. Neither call carried ``user_id_type=open_id`` on the URL. All the
+   user ids the skill holds (``settings.feishu.default_assignee_open_id``,
+   the mention ids extracted from IM events, etc.) are open_ids. The
+   Feishu task v2 endpoint, when ``user_id_type`` is omitted, treats
+   ``members[].id`` as a Feishu uid -- our open_id then either gets
+   rejected silently or written as an unresolved member.
+3. The caller did not check ``code==0`` on the ``add_members``
+   response. Combined with the previous two points, this turned a
+   silent failure into ``created+assigned`` in the heartbeat. "The
+   system says success, the user sees nothing."
+
+Fix is structural rather than patch-level:
+
+- ``create_task`` now accepts ``assignee_open_id`` and passes
+  ``members=[{id, id_type: 'open_id', type: 'user', role: 'assignee'}]``
+  directly in the POST body. Atomic creation: the task is born
+  already-visible to the user, or not at all. The URL also carries
+  ``?user_id_type=open_id`` so the response echoes ids in the format
+  we sent in.
+- Every other task v2 call in the skill (``update_task``,
+  ``add_assignee``, ``check_task_write_api``, the new ``get_task``
+  helper) now carries ``user_id_type=open_id`` as well, eliminating
+  the entire class of "silently wrong id type" bugs.
+- ``feishu_tasks.command_create`` issues a verification
+  ``GET /task/v2/tasks/{guid}?user_id_type=open_id`` immediately after
+  the create returns ``code=0`` and inspects ``data.task.members`` for
+  the intended open_id. Results are classified into one of:
+    * ``created+visible``         -- task is in the user's list
+    * ``created-but-invisible``   -- API accepted it but verify shows
+                                     the assignee missing; counted as
+                                     a failure, cursor regresses to
+                                     ``failed`` so the next cron tick
+                                     retries the same window
+    * ``created-visibility-unknown`` -- verify GET itself crashed
+                                       (e.g. transient network); soft
+                                       warning only
+    * ``created-no-assignee``     -- no assignee was configured at all
+    * ``failed``                  -- POST returned non-zero ``code``
+                                     or threw
+  The ``latest-report.json`` now exposes
+  ``created_count`` (only visible/no-assignee outcomes),
+  ``created_but_invisible_count``, ``visibility_unknown_count``, and
+  the per-result ``visibility_detail`` block listing the expected
+  open_id, the members actually returned, and the verify code.
+- ``SKIP_STATUSES`` (in ``sync_feishu_tasks``) gains
+  ``created+visible`` and ``created-no-assignee`` so the next cron
+  tick does not try to re-create them. The old names ``created`` and
+  ``created+assigned`` are kept for backward compatibility with state
+  files written by 0.3.4 and earlier. ``created-but-invisible`` and
+  ``created-visibility-unknown`` are deliberately NOT in the set --
+  the user has not seen those tasks yet, so retry is correct (we
+  prefer occasional duplicates that the user can dedup over silent
+  invisibility).
+- ``prompts/heartbeat.md`` adds a new "任务可见性预警" section
+  describing exactly when to emit the warning banner (whenever
+  ``created_but_invisible_count > 0`` or ``visibility_unknown_count >
+  0``) and what the banner must contain (the offending GUIDs so the
+  user can look them up via API).
+
+Not in scope: tasks created by 0.3.4 or earlier that are stuck
+invisible on the server. They have valid GUIDs but no members; the
+Feishu API has no "add me as creator" operation, only "add_members".
+A follow-up housekeeping pass could iterate the per-fingerprint
+state, find any ``created+assigned`` (legacy) records whose live task
+still has empty ``members``, and attempt a one-shot ``add_assignee``
+with ``user_id_type=open_id``. This release does not do that
+automatically -- the cron path's natural retry behaviour will
+recreate the same windows shortly, and we did not want to mix a
+backfill into the same release as the structural fix.
+
+SKILL.md bumped to 0.3.5; top-level README skill row bumped to 0.3.5.
+
+Verified locally with mocked ``_http_json`` exercising three
+scenarios end-to-end through ``feishu_tasks.command_create``:
+  - visible:   one task, response members echo the expected open_id
+               -> status=created+visible, created_count=1, rc=0
+  - invisible: members come back empty
+               -> status=created-but-invisible, failed_count=1, rc=1
+  - softfail:  POST returns code=1254301
+               -> status=failed, failed_count=1, rc=1
+All three scenarios produce the correct visibility_detail and update
+the cursor accordingly.
+
 ## 0.3.4 – task-create must use the user identity + stale-running cursor self-heal
 
 User report (from the 0.3.2 heartbeat that finally produced a real

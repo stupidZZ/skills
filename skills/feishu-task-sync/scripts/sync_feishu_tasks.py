@@ -91,7 +91,22 @@ QUESTION_PATTERNS = [
     r"怎么",
 ]
 
-SKIP_STATUSES = {"baseline-seen", "created", "created+assigned"}
+# Statuses that mean "the task already exists and the user can see it,
+# so we must not try to create it again on the next cron tick". Old
+# names (``created`` / ``created+assigned``) are kept for backward
+# compatibility with state files written by 0.3.4 and earlier; the new
+# names from 0.3.5 (``created+visible`` / ``created-no-assignee``) are
+# the canonical entries written by the current implementation.
+# Crucially, ``created-but-invisible`` and ``created-visibility-unknown``
+# are *not* in this set: the next tick should retry them because the
+# user has not actually seen the task yet.
+SKIP_STATUSES = {
+    "baseline-seen",
+    "created",
+    "created+assigned",
+    "created+visible",
+    "created-no-assignee",
+}
 TASK_SCOPE_HINTS = ["task:task:read", "task:task:write"]
 FEISHU_DOC_SCOPE_HINTS = [
     "docx:document:readonly",
@@ -1046,7 +1061,7 @@ class FeishuClient:
         try:
             data = self._http_json(
                 "PATCH",
-                f"https://open.feishu.cn/open-apis/task/v2/tasks/{guid}",
+                f"https://open.feishu.cn/open-apis/task/v2/tasks/{guid}?user_id_type=open_id",
                 payload={"task": {"summary": "feishu-task-sync write probe"}, "update_fields": ["summary"]},
                 headers=self.auth_headers(),
             )
@@ -1132,13 +1147,51 @@ class FeishuClient:
                 "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
             }
 
-    def create_task(self, summary: str, description: Optional[str] = None) -> Dict[str, Any]:
+    def create_task(
+        self,
+        summary: str,
+        description: Optional[str] = None,
+        *,
+        assignee_open_id: Optional[str] = None,
+        due: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a Feishu task.
+
+        Two things this implementation insists on, both of which were
+        bugs in earlier releases:
+
+        * The ``user_id_type=open_id`` query parameter must be set on
+          every task v2 call this skill makes, because all the user ids
+          we hold (``settings.feishu.default_assignee_open_id``, the
+          mention ids extracted from IM events, etc.) are open_ids.
+          Without this, ``members[].id`` would be parsed as a Feishu
+          uid and the API would either reject the request or silently
+          drop the membership, producing an "orphan task" that is
+          accepted (``code=0``) but does not appear in the user's task
+          list.
+        * ``members`` must be included *in the POST body*, not added
+          afterwards through ``add_members``. The atomic form
+          guarantees the task is born already-visible to the assignee;
+          the previous two-call shape (``POST /tasks`` then
+          ``POST /tasks/{guid}/add_members``) could leave behind a
+          half-created task if the second call returned non-zero -- and
+          because nobody checked ``code==0`` on add_members, that
+          state was being reported as ``created+assigned`` in the
+          heartbeat. See 0.3.5 CHANGELOG for the full story.
+        """
+
         payload: Dict[str, Any] = {"summary": summary}
         if description:
             payload["description"] = description[:3000]
+        if assignee_open_id:
+            payload["members"] = [
+                {"id": assignee_open_id, "id_type": "open_id", "type": "user", "role": "assignee"}
+            ]
+        if due is not None:
+            payload["due"] = due
         return self._http_json(
             "POST",
-            "https://open.feishu.cn/open-apis/task/v2/tasks",
+            "https://open.feishu.cn/open-apis/task/v2/tasks?user_id_type=open_id",
             payload=payload,
             headers=self.auth_headers(),
         )
@@ -1151,16 +1204,41 @@ class FeishuClient:
         wrapped_payload = {"task": payload, "update_fields": update_fields}
         return self._http_json(
             "PATCH",
-            f"https://open.feishu.cn/open-apis/task/v2/tasks/{task_guid}",
+            f"https://open.feishu.cn/open-apis/task/v2/tasks/{task_guid}?user_id_type=open_id",
             payload=wrapped_payload,
             headers=self.auth_headers(),
         )
 
     def add_assignee(self, task_guid: str, user_id: str) -> Dict[str, Any]:
+        """Add a single assignee to an existing task.
+
+        Retained for callers that genuinely need to attach an extra
+        member to an already-created task (e.g. follow-up enrichment
+        flows). The cron create path should prefer
+        ``create_task(..., assignee_open_id=...)``: atomic creation
+        avoids the half-created-task pathology that motivated 0.3.5.
+        """
+
         return self._http_json(
             "POST",
-            f"https://open.feishu.cn/open-apis/task/v2/tasks/{task_guid}/add_members",
-            payload={"members": [{"id": user_id, "type": "user", "role": "assignee"}]},
+            f"https://open.feishu.cn/open-apis/task/v2/tasks/{task_guid}/add_members?user_id_type=open_id",
+            payload={"members": [{"id": user_id, "id_type": "open_id", "type": "user", "role": "assignee"}]},
+            headers=self.auth_headers(),
+        )
+
+    def get_task(self, task_guid: str) -> Dict[str, Any]:
+        """Read back a task by GUID for post-create verification.
+
+        We call this immediately after ``create_task`` to confirm the
+        ``members`` list actually contains the intended assignee. The
+        Feishu task v2 ``GET`` endpoint requires ``user_id_type`` for
+        the returned ids to come back as open_ids, matching what we
+        sent in.
+        """
+
+        return self._http_json(
+            "GET",
+            f"https://open.feishu.cn/open-apis/task/v2/tasks/{task_guid}?user_id_type=open_id",
             headers=self.auth_headers(),
         )
 
