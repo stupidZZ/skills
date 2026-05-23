@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.5
+version: 0.3.6
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -96,15 +96,19 @@ trigger_phrases:
    **例外**：`status == "manifest_missing"` 或 `manifest_parse_error`
    说明 Skill 文件损坏，应提示用户重新安装 Skill。
 
-3. **列出广播渠道**：调用 Kian `ListBroadcastChannels`，让用户挑一个
-   用作心跳 / 摘要的广播渠道；建议同一个渠道做两用，除非用户明确要
-   分开。
+3. **确认交付路径（机器人私聊）**：0.3.6 以后心跳 / 摘要 / 升级通知统一
+   以 `cli_a956…` 身份通过机器人私聊发给 `default_assignee_open_id`
+   （即用户本人），路径是 `bootstrap.py send-message`。**不再使用**
+   Kian 的 `ListBroadcastChannels` / `broadcast` 工具。本步只需一句话跟用户
+   确认：心跳将以机器人私聊的形式送达。
 
-4. **收集 4 个字段**（缺一不可，必须从用户那里要到，不可猜测）：
+4. **收集 3 个字段**（缺一不可，必须从用户那里要到，不可猜测）：
    - 飞书 self-built app 的 `app_id`（`cli_xxx`）
    - 同 app 的 `app_secret`
    - OAuth `redirect_uri`（与第 2 步填入飞书后台的值完全一致）
-   - 上一步选好的 `broadcast.heartbeat_channel_id`
+
+   `broadcast.heartbeat_channel_id` 仍是 config schema 里的可选字段，只是
+   0.3.6 后不再参与交付；可以填 `null`。
 
 5. **执行安装 Stage 1**：把字段拼成下面这种 JSON，喂给：
    ```bash
@@ -122,7 +126,7 @@ trigger_phrases:
        "redirect_uri": "http://localhost:8765/feishu/oauth/callback"
      },
      "broadcast": {
-       "heartbeat_channel_id": "...",
+       "heartbeat_channel_id": null,
        "daily_summary_channel_id": null
      }
    }
@@ -144,9 +148,11 @@ trigger_phrases:
    后说 ‘重试’。”并在用户说“重试”时重新执行同一条命令。
 
    Agent 收到 stage=`ready` 的 JSON 后：
-   - **首跑心跳**：把 `broadcast.suggested_message` 通过 Kian `broadcast`
-     工具发到 `broadcast.channel_id`。**这是用户得知“安装成功”的唯一
-     信号**，绝不能漏。
+   - **首跑心跳**：调 `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json
+     --config {{SKILL_DIR}}/config.json send-message --text
+     '<broadcast.suggested_message>'`（0.3.6+）。机器人会以私聊发给
+     `default_assignee_open_id`。**这是用户得知“安装成功”的唯一信号**，
+     绝不能漏；也不要退回到 Kian `broadcast` 工具。
    - **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台
      助手”（或类似职责的 background-only Agent），用 `CreateAgent` 创建
      一个，description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发
@@ -256,6 +262,38 @@ summary.halt_reason = "user_auth_unavailable"
 `state/user-auth.json.refresh-lock` 上）：同机多个进程同时 refresh
 时，后者进入临界区后会重读状态，看到【同伴刚刷新过、access_token 还
 能活超过 5min】就不再去调飞书，避免自伤型 token 轮换。
+
+## 交付路径（0.3.6+）
+
+在 0.3.6 之前，心跳 / 摘要 / 升级通知是 Kian Agent 调 `broadcast` 工具
+走广播群机器人 webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`）。
+那条路径依赖 webhook URL 预先绑定的群，无法精准送达给“用户本人”，也要求为每
+个需求额外创建一个“广播群机器人”，与 Kian 本身已经接入的 `cli_a956…`
+应用所具备的 `im.message.receive_v1` 长连接重复。
+
+0.3.6 起统一走“机器人私聊”交付路径：
+
+```bash
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message --text '<消息文本>'
+# 多行中文推荐走 stdin：
+# cat <<'EOM' | python3 .../bootstrap.py ... send-message
+# <消息文本>
+# EOM
+```
+
+该命令调 `/im/v1/messages?receive_id_type=open_id`，底层是 tenant access token +
+`im:message:send_as_bot` 身份。默认接收方是 `settings.feishu.default_assignee_open_id`
+（用户本人的 open_id）；需要发送给别人时使用 `--to ou_xxx`。
+
+这意味着：
+
+- `settings.broadcast.heartbeat_channel_id` / `daily_summary_channel_id` 依然是
+  config schema 中的可选字段，但 0.3.6+ 不再参与运行时交付。Agent
+  不要调用 Kian 的 `broadcast` 工具。
+- 需要 `im:message:send_as_bot` 作为 tenant scope（权限 manifest 0.3.6+
+  已包含）。未发布该权限会让 `send-message` 返回 `ok=false`。
+- 上游任何升级通知、首跑心跳、post-update 后报、每小时 heartbeat、
+  每日 11:00 摘要，**都**走这一条路。
 
 ## 自动更新检查
 

@@ -3,6 +3,97 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.6 – deliver via bot DM instead of webhook broadcast
+
+Design-level shift in how user-facing notifications leave the skill.
+Motivation: Kian itself already runs a long-lived ``im.message.receive_v1``
+long-connection against the same ``cli_a956…`` application, so the
+bot identity is permanently online; meanwhile the old ``broadcast
+channel ID=1`` path went through a *separate* group-bot webhook which
+did not let us address an individual user, required a dedicated group,
+and duplicated infrastructure with what Kian was already doing.
+
+* ``permissions/required-scopes.json`` adds seven tenant scopes:
+  ``im:message``, ``im:message.group_at_msg``, ``im:message.p2p_msg``,
+  ``im:message:send_as_bot``, ``im:resource``, ``im:chat``,
+  ``cardkit:card:write``. The first five plus ``cardkit:card:write``
+  are what Kian's built-in Feishu chat-channel documentation requires;
+  ``im:message:send_as_bot`` is what the new outbound DM path needs;
+  ``im:chat`` is reserved for future group routing.
+  ``permissions/README.md`` explains why each tenant scope is now
+  required. ``permissions-check`` will surface the additions as
+  ``status=changed`` and list them under ``diff.added`` for existing
+  installs.
+
+* New ``FeishuClient.send_text_to_user(open_id, text)`` that POSTs
+  ``/im/v1/messages?receive_id_type=open_id`` using the tenant access
+  token (the bot identity). Content is JSON-encoded as the API
+  expects. The method forces tenant auth regardless of the client's
+  ``auth_mode`` so concurrent user-mode callers (e.g. a follow-up task
+  create) are unaffected.
+
+* New ``bootstrap.py send-message`` subcommand. Body comes from
+  ``--text`` or stdin; recipient defaults to
+  ``settings.feishu.default_assignee_open_id``. Returns structured
+  JSON for the agent including ``message_id`` on success and an
+  actionable ``hint`` on common failures (most often the
+  ``im:message:send_as_bot`` scope not being published yet).
+
+* Activation rules in ``SKILL.md`` rewritten:
+  - Step 3 "列出广播渠道" → "确认交付路径为机器人私聊".
+  - Step 4 no longer collects a ``broadcast.heartbeat_channel_id``.
+    The field remains in the config schema for backward compatibility
+    but installs created from 0.3.6 onwards write it as ``null``.
+  - Step 6 first-run heartbeat goes through ``send-message`` instead
+    of Kian's ``broadcast`` tool.
+  - A new "交付路径（0.3.6+）" section explicitly documents the
+    rationale (avoid duplicating with Kian's chat channel, address an
+    individual user precisely, no extra group bot needed).
+
+* ``prompts/agent-hourly.md``, ``prompts/heartbeat.md``, and
+  ``prompts/daily-summary.md`` updated to instruct the background
+  agent to deliver via ``send-message`` (with ``cat <<HEARTBEAT |
+  bootstrap.py ... send-message`` recommended for multi-line
+  payloads); the old ``ListBroadcastChannels`` / ``broadcast`` tool
+  usage is explicitly forbidden. Heartbeat/daily-summary prompts also
+  tell the agent NOT to fall back to webhook on send-message failure;
+  the 0.3.6 contract is "surface the error, let the user fix the
+  scope publication, retry".
+
+* ``bootstrap.py``'s post-update and install-stage-ready hand-offs
+  now point at ``send-message`` in their ``next_steps`` so the
+  upgrade-from-0.3.5 flow lands cleanly on the new path the moment
+  the new manifest is published.
+
+* ``bootstrap.py`` config validation: ``broadcast.heartbeat_channel_id``
+  is no longer required. Existing 0.3.5- configs that have it set
+  still load; new ``install`` JSON inputs may omit it.
+
+Migration for existing 0.3.5 installs:
+  1. ``update apply`` -> ``post-update`` lands the new bundle (the
+     0.3.0 auto-update mechanism handles this).
+  2. ``permissions-check`` will report status=changed, listing the
+     seven new tenant scopes. The agent surfaces ``diff.added``; the
+     user re-imports the manifest in the Feishu console and clicks
+     "create version + release".
+  3. The user calls ``permissions-mark-imported`` (or the agent does
+     it for them).
+  4. The first cron tick that runs against 0.3.6 sends the heartbeat
+     via ``send-message`` instead of the old broadcast channel. The
+     legacy ``broadcast.heartbeat_channel_id`` in ``config.json`` is
+     simply ignored from now on.
+
+Verified locally:
+  - ``send_text_to_user`` against mocked ``_http_json`` issues a
+    single POST to ``/im/v1/messages?receive_id_type=open_id`` with a
+    tenant-Bearer Authorization header, ``msg_type=text`` and a
+    properly JSON-encoded ``content`` string that round-trips
+    multi-line text + emoji.
+  - ``bootstrap.py send-message --text '...'`` end-to-end against the
+    same mocks returns ``ok=true``, surfaces ``message_id``, exit 0.
+  - Config validation no longer rejects an input whose
+    ``broadcast.heartbeat_channel_id`` is ``null``.
+
 ## 0.3.5 – atomic create-with-assignee + post-create visibility verification
 
 User report: the 0.3.4 daily summary reported two tasks as

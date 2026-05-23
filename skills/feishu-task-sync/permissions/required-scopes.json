@@ -1,6 +1,14 @@
 {
   "scopes": {
-    "tenant": [],
+    "tenant": [
+      "im:message",
+      "im:message.group_at_msg",
+      "im:message.p2p_msg",
+      "im:message:send_as_bot",
+      "im:resource",
+      "im:chat",
+      "cardkit:card:write"
+    ],
     "user": [
       "offline_access",
       "im:chat:readonly",

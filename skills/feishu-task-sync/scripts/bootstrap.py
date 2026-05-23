@@ -260,9 +260,13 @@ def _validate_user_input(config: Dict[str, Any]) -> List[str]:
         errors.append("feishu.app_secret is required (or set KIAN_FEISHU_APP_SECRET).")
     if not _is_truthy(feishu.get("redirect_uri")):
         errors.append("feishu.redirect_uri is required.")
-    broadcast = config.get("broadcast") or {}
-    if not _is_truthy(broadcast.get("heartbeat_channel_id")):
-        errors.append("broadcast.heartbeat_channel_id is required. Pick one from ListBroadcastChannels.")
+    # broadcast.heartbeat_channel_id used to be mandatory because the old
+    # delivery path called Kian's broadcast tool against a webhook bot.
+    # As of 0.3.6 we deliver via send-message -> /im/v1/messages with the
+    # tenant bot identity, addressed at
+    # ``feishu.default_assignee_open_id``. The broadcast fields remain in
+    # the schema for backward compatibility (existing 0.3.5- configs do
+    # not fail to load) but are no longer required.
     return errors
 
 
@@ -1836,7 +1840,7 @@ def _command_post_update(args: argparse.Namespace) -> int:
             "suggested_message": suggested_message,
         },
         "next_steps": [
-            "使用 Kian 的 broadcast 工具将 broadcast.suggested_message 发送到 broadcast.channel_id。",
+            "调 send-message 将 broadcast.suggested_message 写入机器人私聊（0.3.6+）：python3 {SKILL_DIR}/scripts/bootstrap.py --print-json --config {CONFIG} send-message --text '<broadcast.suggested_message>'。不再使用 Kian 的 broadcast 工具。",
             "本命令已跳过 first-run 空 Todo 测试；不要手动重跑 first-run。",
             "若 doctor 未通过且存在 marker.backup，可回滚：rm -rf <SKILL_DIR> && mv <backup> <SKILL_DIR>。",
         ],
@@ -2029,6 +2033,96 @@ def _command_permissions_mark_imported(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_send_message(args: argparse.Namespace) -> int:
+    """Send a plain-text DM to a Feishu user via the bot identity.
+
+    Replaces the pre-0.3.6 "agent calls Kian's broadcast tool against
+    webhook channel 1" plumbing. The activating Kian agent calls this
+    command with ``--text`` whenever it wants to deliver a heartbeat,
+    daily summary, or upgrade notice to the user; the recipient is
+    ``settings.feishu.default_assignee_open_id`` by default so messages
+    arrive in the user's private chat with the bot rather than in a
+    group.
+
+    The agent is still free to fan out to other users by passing
+    ``--to <other_open_id>`` (handy for team-wide bulletins), but the
+    default reflects the 0.3.6 "DM the operator" design.
+    """
+
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+
+    text = args.text
+    if text is None:
+        text = sys.stdin.read()
+    text = text.strip("\n")
+    if not text:
+        _emit({"ok": False, "reason": "empty_text"}, args.print_json, ["请通过 --text 或 stdin 传入非空文本。"])
+        return 2
+
+    target = args.to or settings.feishu.default_assignee_open_id
+    if not target:
+        _emit(
+            {"ok": False, "reason": "no_recipient"},
+            args.print_json,
+            ["未提供 --to，也未在 config.json 里配置 default_assignee_open_id。"],
+        )
+        return 2
+
+    from sync_feishu_tasks import FeishuClient, FeishuApiError
+
+    # Use the *user*-mode client so it does not eagerly fetch a tenant
+    # token unless DM-send actually needs one. send_text_to_user picks
+    # up the tenant token internally.
+    client = FeishuClient(settings, auth_mode="user")
+    try:
+        resp = client.send_text_to_user(target, text)
+    except FeishuApiError as exc:
+        payload = exc.payload if isinstance(exc.payload, dict) else None
+        _emit(
+            {
+                "ok": False,
+                "recipient": target,
+                "error": str(exc),
+                "response": payload,
+                "hint": (
+                    "检查是否已在飞书后台为应用身份开启并发布 im:message:send_as_bot "
+                    "（权限 manifest 0.3.6+ 已包含该项）。"
+                ),
+            },
+            args.print_json,
+            [f"发送失败：{exc}"],
+        )
+        return 2
+
+    code = resp.get("code") if isinstance(resp, dict) else None
+    if code not in (None, 0):
+        _emit(
+            {"ok": False, "recipient": target, "response": resp},
+            args.print_json,
+            [f"发送返回非零码响应：code={code} msg={resp.get('msg') if isinstance(resp, dict) else resp}"],
+        )
+        return 2
+
+    data = resp.get("data") if isinstance(resp, dict) else None
+    message_id = (data or {}).get("message_id") if isinstance(data, dict) else None
+    _emit(
+        {
+            "ok": True,
+            "recipient": target,
+            "message_id": message_id,
+            "chars_sent": len(text),
+        },
+        args.print_json,
+        [f"已发送到 {target}（message_id={message_id}）"],
+    )
+    return 0
+
+
 def _read_local_version_safe() -> Optional[str]:
     try:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -2110,6 +2204,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Record that the user has imported & published the current scope manifest in the Feishu developer console.",
     )
 
+    p_send = sub.add_parser(
+        "send-message",
+        help="Send a plain-text DM to a Feishu user via the bot identity. Replaces the legacy webhook broadcast channel.",
+    )
+    p_send.add_argument("--text", required=False, default=None, help="Message body. If omitted, read from stdin.")
+    p_send.add_argument("--to", default=None, help="Recipient open_id. Defaults to settings.feishu.default_assignee_open_id.")
+
     p_update = sub.add_parser(
         "update",
         help="Check or apply skill upgrades from the upstream repository. Wraps scripts/updater.py.",
@@ -2150,6 +2251,8 @@ def main(argv: Sequence[str]) -> int:
         return _command_permissions_check(args)
     if args.command == "permissions-mark-imported":
         return _command_permissions_mark_imported(args)
+    if args.command == "send-message":
+        return _command_send_message(args)
     if args.command == "update":
         forwarded: List[str] = []
         if args.config:

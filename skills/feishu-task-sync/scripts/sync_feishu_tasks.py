@@ -1226,6 +1226,40 @@ class FeishuClient:
             headers=self.auth_headers(),
         )
 
+    def send_text_to_user(self, open_id: str, text: str) -> Dict[str, Any]:
+        """Send a plain-text message to a single user as the bot.
+
+        Requires the ``im:message:send_as_bot`` tenant scope. We send
+        ``msg_type=text`` because every Feishu client (mobile / desktop /
+        web) supports it without extra parsing, and our heartbeat /
+        summary content is markdown-friendly plain text. The endpoint
+        wants the message content as a JSON-encoded *string* inside the
+        outer JSON body, hence the nested ``json.dumps``.
+
+        Tenant-token DM is the 0.3.6 replacement for the old webhook
+        broadcast channel: it does not require the user to be in any
+        particular group, the message arrives in a private chat with
+        the bot, and only the recipient sees it.
+        """
+
+        # Force tenant auth for this call -- DM-as-bot is a bot-identity
+        # operation, not a user-identity one. Build a transient header
+        # rather than mutate ``self.auth_mode`` so concurrent callers
+        # (e.g. a later user-identity task create) are not affected.
+        tenant_token = self.tenant_access_token()
+        headers = {"Authorization": f"Bearer {tenant_token}"}
+        body = {
+            "receive_id": open_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        return self._http_json(
+            "POST",
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+            payload=body,
+            headers=headers,
+        )
+
     def get_task(self, task_guid: str) -> Dict[str, Any]:
         """Read back a task by GUID for post-create verification.
 

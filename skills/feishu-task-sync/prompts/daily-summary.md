@@ -40,9 +40,15 @@ doc_api ok=<true/false>
 
 ## 静默规则
 
-- 摘要必须发送到广播渠道，**不**发送到主开发对话。
-- 没有识别到明确事项时，也通过广播渠道发送一条 “今日无新明确事项 + 扫描统计”
-  的摘要。
+- 摘要必须通过机器人私聊发给用户本人，**不**发送到主开发对话。
+- 交付命令 (0.3.6+)：
+  ```bash
+  cat <<\SUMMARY | python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message
+  <这里拼你生成的今日摘要文本>
+  SUMMARY
+  ```
+  该命令以 `im:message:send_as_bot` 身份调 `/im/v1/messages?receive_id_type=open_id`，默认发给 `settings.feishu.default_assignee_open_id`。不再使用 Kian 的 `broadcast` 工具，也不再读 `config.json.broadcast.heartbeat_channel_id`。
+- 没有识别到明确事项时，也通过同一交付路径发送一条 “今日无新明确事项 + 扫描统计” 的摘要。
 - 不要在主开发对话里输出日报 / 同步状态 / 无事项说明 / 常规监控结果。
-- 只有当广播失败、权限异常、OAuth 过期且刷新失败、脚本异常或需要用户人工
+- 只有当发送失败（`send-message ok=false`）、权限异常、OAuth 过期且刷新失败、脚本异常或需要用户人工
   处理时，才在主开发对话里简要说明。

@@ -25,9 +25,23 @@ instead of toggling each scope by hand.
 
 ## Schema notes
 
-- `scopes.tenant` — application-identity scopes. This Skill does **not**
-  require any tenant-side scopes today, but the array is kept for future
-  growth; leaving it empty is intentional.
+- `scopes.tenant` — application-identity ("machine") scopes used by
+  the bot itself. Required since 0.3.6 for three independent reasons:
+  * **Kian's built-in Feishu chat channel** subscribes to
+    `im.message.receive_v1` over a long-lived connection. The chat
+    channel needs `im:message`, `im:message.group_at_msg`,
+    `im:message.p2p_msg` to actually receive the inbound events, and
+    `im:resource` + `cardkit:card:write` for richer reply formats.
+  * **feishu-task-sync's outbound layer** sends heartbeats and the
+    11:00 summary as the bot user, requiring `im:message:send_as_bot`.
+    `target_chat_id` is no longer required because the messages are
+    delivered to ``settings.feishu.default_assignee_open_id`` directly
+    (i.e. the bot DMs you).
+  * **Future group routing** uses `im:chat` to read group membership;
+    keeping it in the manifest now avoids a second batch-import later.
+  After importing the JSON, the developer console still requires
+  clicking "Create Version & Release" before the tenant scopes become
+  effective.
 - `scopes.user` — user-identity OAuth scopes. These are the ones the Skill
   asks for during OAuth (`bootstrap.py install` step 1). They must all be
   present **and the new app version must be published** before

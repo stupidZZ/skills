@@ -84,7 +84,30 @@ python3 {{SKILL_DIR}}/scripts/feishu_tasks.py --config {{SKILL_DIR}}/config.json
 
 只有 collect、Agent 写 Todo JSON、create 三段全链路成功，才允许推进游标。若 Agent 无法写出合法 Todo JSON，不要调用 `create`，也不要推进游标。
 
-5. 心跳卡片：使用 `{{SKILL_DIR}}/prompts/heartbeat.md` 的模板，通过 `config.json.broadcast.heartbeat_channel_id` 指定的广播渠道（在 Kian 中即 `ListBroadcastChannels` 返回的 id）发送。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
+5. 心跳卡片：使用 `{{SKILL_DIR}}/prompts/heartbeat.md` 的模板生成心跳文本，以底下“交付渠道”一节描述的方式发送。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
+
+## 交付渠道（0.3.6+）
+
+Kian 在 0.3.6 之后默认不再使用“广播群机器人 webhook”发心跳。交付路径是让机器人应用（`cli_a956…`）以 `im:message:send_as_bot` 身份私聊发给用户本人：
+
+```bash
+# 文本可以从 stdin 传入（推荐，避免 shell 引号转义问题）
+cat <<\HEARTBEAT | python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message
+<这里按 heartbeat.md 拼出的中文心跳卡片文本>
+HEARTBEAT
+```
+
+你也可以用 `--text "..."` 传入。但对任何多行中文文本，**强烈推荐 stdin**：heartbeat 文本里带着 `\n` / 反引号 / emoji 都能一次传完。
+
+默认接收方是 `settings.feishu.default_assignee_open_id`（安装时填的那个 open_id，即用户本人）。需要发给别人时加 `--to ou_xxx`。
+
+调用返回示例：
+
+```json
+{"ok": true, "recipient": "ou_xxx", "message_id": "om_xxx", "chars_sent": 1234}
+```
+
+`ok=false` 时主要看 `hint` 字段 —— 最常见原因是未发布 `im:message:send_as_bot` 该版本，或者机器人能力未开启。这种情况下**不要**退回老 `broadcast` 工具：0.3.6 以后 webhook 渠道不再作为 fallback，请直接告诉用户去飞书后台发布权限并重试。
 
 6. 静默规则：
 
