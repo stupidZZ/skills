@@ -3,6 +3,52 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.7 – fix invalid scope identifiers in the 0.3.6 tenant manifest
+
+The 0.3.6 ``permissions/required-scopes.json`` listed two identifiers
+as tenant OAuth scopes that are actually **event names**, not scope
+names:
+
+- ``im:message.group_at_msg``
+- ``im:message.p2p_msg``
+
+Those belong on the developer console under 事件与回调 → 事件订阅
+(per-event "请开通以下任一权限" picker, where they show up because
+the selected event needs them), not in the OAuth scope manifest. The
+Feishu console rejects them on batch import ("格式错误"), which
+blocked all 0.3.6 fresh installs and upgrades at activation step 2.
+
+Fix is a pure manifest correction:
+
+* ``permissions/required-scopes.json`` drops the two invalid
+  identifiers. The remaining five tenant scopes (``im:message``,
+  ``im:message:send_as_bot``, ``im:resource``, ``im:chat``,
+  ``cardkit:card:write``) cover everything 0.3.6's runtime needs:
+  ``im:message`` is the umbrella scope under which receiving group
+  ``@bot`` events and p2p messages is gated; ``im:message:send_as_bot``
+  is required for the outbound DM path; the rest match Kian's own
+  chat-channel guidance.
+* ``permissions/README.md`` adds an explicit warning that event names
+  (e.g. ``im:message.group_at_msg``) are *not* valid OAuth scope
+  identifiers and must not appear in this manifest.
+* No code changes; ``send_text_to_user`` and ``bootstrap.py
+  send-message`` were correct in 0.3.6 and continue to use
+  ``im:message:send_as_bot``.
+
+For users who already moved past the import error in 0.3.6 by
+stripping those two lines by hand: the 0.3.7 manifest produces a
+different fingerprint than your hand-edited version, so
+``permissions-check`` will report ``status=changed`` once. Just run
+``permissions-mark-imported`` to refresh the fingerprint; you do not
+need to re-publish anything in the Feishu console (the actual scope
+set is identical).
+
+For users who could not get past 0.3.6 at all: ``update apply`` to
+0.3.7, then re-import this manifest in the Feishu console, click
+"Create Version & Release", and continue activation step 2 as usual.
+
+Bumped SKILL.md to 0.3.7; top-level README skill row to 0.3.7.
+
 ## 0.3.6 – deliver via bot DM instead of webhook broadcast
 
 Design-level shift in how user-facing notifications leave the skill.
