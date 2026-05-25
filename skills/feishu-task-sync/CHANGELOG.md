@@ -3,6 +3,42 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.9 – require background Agent model alignment with the main Agent
+
+Operational fix after a real incident: manual execution by the main
+Agent succeeded (main model = ``openrouter:openai/gpt-5.5``), while
+the hourly cron kept failing before it ran any scripts because the
+dedicated background Agent ("飞书任务后台助手") still had an old
+independent default model: ``openrouter:anthropic/claude-opus-4.7``.
+That model was currently unavailable / rejected by OpenRouter, so the
+cron prompts produced ``403`` errors ("model not available in your
+region" or "provider Terms Of Service") before collect/create/send
+steps even started.
+
+Design decision: the background Agent is an execution shell for the
+same workflow the main Agent configured; it should **inherit / stay
+aligned with the main Agent's current model and thinking level**,
+not keep its own stale model selection.
+
+Changes:
+
+- ``SKILL.md``段 3 now contains an explicit mandatory step between
+  "create or reuse 飞书任务后台助手" and "write cron": read the current
+  main Agent default model + thinking level and call ``UpdateAgent``
+  so the background Agent matches. Example: if the main Agent is
+  ``openrouter:openai/gpt-5.5`` + ``high``, the background Agent must
+  be the same before writing ``targetAgentId`` into ``cronjob.json``.
+- The old 8-step reference block receives the same warning so older
+  conversations that still quote the legacy flow do not recreate the
+  bug.
+
+No script changes: Kian's model selection lives in Agent metadata and
+must be changed through Kian's Agent-management tools (``UpdateAgent``),
+not by mutating files inside the skill. The user has already updated
+``p-2026-05-21-1`` in-place to match the main Agent.
+
+Bumped SKILL.md to 0.3.9; top-level README skill row to 0.3.9.
+
 ## 0.3.8 – install-time self-check overhaul + post-update cronjob refresh
 
 Motivation. The 0.2.3 -> 0.3.7 journey exposed a series of

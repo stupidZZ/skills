@@ -10,7 +10,7 @@ description: |
   每小时让 Agent 自己阅读最近飞书聊天/文档/Wiki 中 @用户 的内容并语义
   提炼 Todo，调用 feishu_tasks.py 创建飞书任务并加用户为 assignee；
   同时每小时心跳 + 每日 11:00 摘要走广播渠道，绝不污染主对话。
-version: 0.3.8
+version: 0.3.9
 homepage: https://github.com/stupidZZ/skills/tree/main/skills/feishu-task-sync
 tags:
   - feishu
@@ -194,7 +194,8 @@ python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/c
 Agent 收到 stage=`ready` 的 JSON 后：
 
 1. **后台 Agent**：调用 `ListAgents`；如果不存在名为“飞书任务后台助手”（或类似职责的 background-only Agent），用 `CreateAgent` 创建一个，description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发对话”。**严禁** 把 `targetAgentId` 设为用户主开发 Agent。
-2. **写 cron**：把 `cron_entries` 中两条写入 Kian `cronjob.json`，`targetAgentId` 填上面选中/创建的后台 Agent ID，`status: "active"`。
+2. **模型配置对齐**（0.3.9+ 强制）：后台 Agent 不应单独维护模型。创建或复用“飞书任务后台助手”后，Agent 必须读取当前主 Agent 的默认模型与 thinking level，并调用 `UpdateAgent` 把后台 Agent 对齐到同一配置。若当前主 Agent 是 `openrouter:openai/gpt-5.5` + `high`，后台 Agent 也必须是同一组。这个步骤在写 cron 之前做，防止 cron 使用旧模型（例如不可用的 Claude）导致整点任务 403。
+3. **写 cron**：把 `cron_entries` 中两条写入 Kian `cronjob.json`，`targetAgentId` 填上面选中/创建的后台 Agent ID，`status: "active"`。
 3. **首跳心跳**：调用（多行推荐 stdin）：
    ```bash
    cat <<\READY | python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message
@@ -312,6 +313,9 @@ Agent 收到 stage=`ready` 的 JSON 后：
      助手”（或类似职责的 background-only Agent），用 `CreateAgent` 创建
      一个，description 强调“仅承担飞书同步心跳/摘要，严禁污染主开发
      对话”。**严禁** 把 `targetAgentId` 设为用户的主开发 Agent。
+   - **模型配置对齐**：创建或复用后台 Agent 后，调用 `UpdateAgent` 将
+     其默认模型与 thinking level 对齐当前主 Agent。不要让后台 Agent 保留
+     自己历史上的独立模型（比如不可用的 Claude）。
 
 7. **写 cron**：把 stage=`ready` 返回的 `cron_entries` 直接写入 Kian
    `cronjob.json`，把每条的 `targetAgentId` 填为上一步选定/创建的后台
