@@ -124,10 +124,101 @@ def load_cursor(path: Path) -> Dict[str, Any]:
 # automatically. The blacklist lives next to sync-cursor.json in state_dir.
 IM_BAD_CHAT_DEFAULT_ERROR_CODES = {230001}
 IM_BAD_CHAT_FAILURE_THRESHOLD = 3  # n consecutive failures before skipping
+THREAD_STATE_RETENTION_DAYS = 3
+THREAD_SCAN_LIMIT = 200
+THREAD_DISCOVERY_LOOKBACK_HOURS = 48
+THREAD_DISCOVERY_CHAT_LIMIT = 500
 
 
 def _im_bad_chats_path(state_dir: Path) -> Path:
     return state_dir / "im-bad-chats.json"
+
+
+def _im_threads_path(state_dir: Path) -> Path:
+    return state_dir / "im-thread-candidates.json"
+
+
+def load_im_threads(state_dir: Path) -> Dict[str, Any]:
+    payload = JsonStore.load(_im_threads_path(state_dir), {"threads": {}})
+    if not isinstance(payload.get("threads"), dict):
+        payload["threads"] = {}
+    return payload
+
+
+def save_im_threads(state_dir: Path, payload: Dict[str, Any]) -> None:
+    JsonStore.save(_im_threads_path(state_dir), payload)
+
+
+def remember_im_thread(payload: Dict[str, Any], message: Dict[str, Any], chat_id: str, chat_title: str, now: datetime) -> None:
+    thread_id = str(message.get("thread_id") or "").strip()
+    if not thread_id:
+        return
+    threads = payload.setdefault("threads", {})
+    rec = threads.get(thread_id) if isinstance(threads.get(thread_id), dict) else {}
+    root_id = str(message.get("root_id") or message.get("parent_id") or message.get("message_id") or "")
+    rec.update({
+        "thread_id": thread_id,
+        "chat_id": chat_id,
+        "chat_title": chat_title,
+        "root_id": root_id or rec.get("root_id"),
+        "last_seen_at": now.isoformat(),
+    })
+    rec.setdefault("first_seen_at", now.isoformat())
+    threads[thread_id] = rec
+
+
+def seed_im_threads_from_cache(cache_dir: Path, payload: Dict[str, Any], now: datetime, limit_files: int = 30) -> Dict[str, Any]:
+    """Best-effort bootstrap for thread candidates from existing cache files.
+
+    0.3.10 introduces ``state/im-thread-candidates.json``. Existing
+    installs already have days of ``output/feishu-chat-cache/*.json``
+    containing root messages and some replies with ``thread_id``. Seeding
+    from those files means the first 0.3.10 run can immediately query
+    recent active threads instead of waiting until a future root message
+    appears inside a normal hourly chat window.
+    """
+
+    try:
+        files = sorted(cache_dir.glob("feishu-chat-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit_files]
+    except Exception:
+        return payload
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for chat_record in data.get("chats") or []:
+            if not isinstance(chat_record, dict):
+                continue
+            chat_id = str(chat_record.get("chat_id") or "")
+            chat_title = str(chat_record.get("chat_title") or chat_id)
+            for page in chat_record.get("pages") or []:
+                for message in _extract_items_from_api_payload(page):
+                    remember_im_thread(payload, message, chat_id, chat_title, now)
+        for thread_record in data.get("threads") or []:
+            if not isinstance(thread_record, dict):
+                continue
+            thread_id = str(thread_record.get("thread_id") or "")
+            chat_id = str(thread_record.get("chat_id") or "")
+            chat_title = str(thread_record.get("chat_title") or chat_id)
+            if thread_id:
+                fake_msg = {"thread_id": thread_id, "root_id": thread_record.get("root_id")}
+                remember_im_thread(payload, fake_msg, chat_id, chat_title, now)
+    return payload
+
+
+def gc_im_threads(payload: Dict[str, Any], now: datetime, retention_days: int = THREAD_STATE_RETENTION_DAYS) -> Dict[str, Any]:
+    threads = payload.get("threads") or {}
+    cutoff = now - timedelta(days=retention_days)
+    kept: Dict[str, Any] = {}
+    for tid, rec in threads.items():
+        if not isinstance(rec, dict):
+            continue
+        dt = parse_dt(rec.get("last_seen_at") or rec.get("first_seen_at"))
+        if dt is None or dt >= cutoff:
+            kept[tid] = rec
+    payload["threads"] = kept
+    return payload
 
 
 def load_im_bad_chats(state_dir: Path) -> Dict[str, Any]:
@@ -418,7 +509,14 @@ def redact_identifier(value: Any, head: int = 8, tail: int = 4) -> str:
     return f"{text[:head]}…{text[-tail:]}"
 
 
-def normalize_feishu_message_item(chat_id: str, chat_title: str, message: Dict[str, Any], cache_path: Path, assignee_user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def normalize_feishu_message_item(
+    chat_id: str,
+    chat_title: str,
+    message: Dict[str, Any],
+    cache_path: Path,
+    assignee_user_id: Optional[str] = None,
+    source_type: str = "feishu_cloud_message",
+) -> Optional[Dict[str, Any]]:
     message_id = str(message.get("message_id") or message.get("messageId") or message.get("id") or "")
     if not message_id:
         return None
@@ -439,9 +537,13 @@ def normalize_feishu_message_item(chat_id: str, chat_title: str, message: Dict[s
     updated_at = message.get("update_time") or message.get("updated_at") or message.get("updateTime") or created_at
     created_dt = parse_dt(created_at)
     updated_dt = parse_dt(updated_at)
+    thread_id = str(message.get("thread_id") or "").strip() or None
+    thread_message_position = str(message.get("thread_message_position") or "").strip() or None
+    root_id = str(message.get("root_id") or "").strip() or None
+    parent_id = str(message.get("parent_id") or "").strip() or None
     return {
-        "id": f"feishu_cloud_message:{chat_id}:{message_id}",
-        "source_type": "feishu_cloud_message",
+        "id": f"{source_type}:{chat_id}:{message_id}",
+        "source_type": source_type,
         "provider": "feishu",
         "source_url": None,
         "file_path": str(cache_path),
@@ -457,6 +559,10 @@ def normalize_feishu_message_item(chat_id: str, chat_title: str, message: Dict[s
             "message_type": str(message.get("message_type") or message.get("msg_type") or ""),
             "mentions": mentions,
             "mentioned_assignee": mentioned_assignee,
+            "thread_id": thread_id,
+            "thread_message_position": thread_message_position,
+            "root_id": root_id,
+            "parent_id": parent_id,
         },
     }
 
@@ -483,8 +589,12 @@ def collect_feishu_cloud_chat_items(
         if chat_id:
             chat_titles[chat_id] = str(session.get("title") or chat_id)
     bad_payload: Dict[str, Any] = {"chats": {}}
+    thread_payload: Dict[str, Any] = {"threads": {}}
     if state_dir is not None:
         bad_payload = load_im_bad_chats(state_dir)
+        thread_payload = gc_im_threads(load_im_threads(state_dir), now)
+        if not (thread_payload.get("threads") or {}):
+            thread_payload = seed_im_threads_from_cache(cache_dir, thread_payload, now)
     skipped_chat_ids: List[str] = []
     cache_payload: Dict[str, Any] = {
         "generated_at": now.isoformat(),
@@ -526,7 +636,9 @@ def collect_feishu_cloud_chat_items(
                 raw_items = _extract_items_from_api_payload(data)
                 chat_record["pages"].append(data)
                 for message in raw_items:
-                    item = normalize_feishu_message_item(chat_id, chat_titles.get(chat_id, chat_id), message, cache_path, assignee_user_id=assignee_user_id)
+                    chat_title = chat_titles.get(chat_id, chat_id)
+                    remember_im_thread(thread_payload, message, chat_id, chat_title, now)
+                    item = normalize_feishu_message_item(chat_id, chat_title, message, cache_path, assignee_user_id=assignee_user_id)
                     if item:
                         items.append(item)
                         chat_record["normalized_count"] += 1
@@ -572,8 +684,155 @@ def collect_feishu_cloud_chat_items(
                 }
             )
         cache_payload["chats"].append(chat_record)
+
+    # Thread discovery pass.
+    #
+    # If a topic root message was created before the current hourly
+    # window, the normal ``since-last-success`` chat scan will not see
+    # that root, so we would never learn its thread_id and therefore
+    # could not fetch replies posted inside the current window. To
+    # reduce that blind spot, scan a wider recent chat history window
+    # purely for ``thread_id`` metadata (no item normalisation). This is
+    # bounded by THREAD_DISCOVERY_* constants and persisted to
+    # state/im-thread-candidates.json.
+    # Wider than the main window: if since is 17:00 but a thread root
+    # was created at 11:00 and replied to at 17:30, using max(...) here
+    # would still miss the root thread_id. Use min(...) so discovery
+    # looks back up to THREAD_DISCOVERY_LOOKBACK_HOURS.
+    discovery_since = min(since, now - timedelta(hours=THREAD_DISCOVERY_LOOKBACK_HOURS))
+    discovery_chats_scanned = 0
+    discovery_errors = 0
+    before_threads = len(thread_payload.get("threads") or {})
+    for chat_id in list(chat_ids)[:THREAD_DISCOVERY_CHAT_LIMIT]:
+        if _im_bad_should_skip(bad_payload, chat_id):
+            continue
+        discovery_chats_scanned += 1
+        page_token = None
+        try:
+            while True:
+                data = client.list_im_messages(
+                    chat_id=chat_id,
+                    start_time=int(discovery_since.timestamp()),
+                    end_time=int(until.timestamp()),
+                    page_size=50,
+                    page_token=page_token,
+                )
+                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+                for message in _extract_items_from_api_payload(data):
+                    remember_im_thread(
+                        thread_payload,
+                        message,
+                        chat_id,
+                        chat_titles.get(chat_id, chat_id),
+                        now,
+                    )
+                page_token = str(payload_data.get("page_token") or "").strip() or None
+                if not bool(payload_data.get("has_more")) or not page_token:
+                    break
+        except FeishuApiError as exc:
+            discovery_errors += 1
+            diagnostics.append({
+                "source": "im.v1.thread_discovery.error",
+                "ok": False,
+                "chat_id_redacted": redact_identifier(chat_id),
+                "error": str(exc),
+                "response": exc.payload,
+                "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
+            })
+    after_threads = len(thread_payload.get("threads") or {})
+
+    # Second pass: topic / thread replies.
+    #
+    # Feishu docs: /im/v1/messages with container_id_type=chat only
+    # guarantees root messages for topics. Replies inside a topic are
+    # retrieved by container_id_type=thread and container_id=<thread_id>,
+    # and thread containers do NOT support start/end time filters. We
+    # therefore keep a rolling list of thread_id candidates observed in
+    # recent chat scans, query those threads, and filter locally by
+    # create_time. This catches the common pattern: a topic root was
+    # created before the current hourly window, but someone @mentioned
+    # the user in a reply during the window.
+    thread_records: List[Dict[str, Any]] = []
+    summary_thread_success = 0
+    summary_thread_failed = 0
+    summary_thread_message_count = 0
+    thread_candidates = list((thread_payload.get("threads") or {}).values())
+    thread_candidates.sort(key=lambda r: str(r.get("last_seen_at") or ""), reverse=True)
+    for rec in thread_candidates[:THREAD_SCAN_LIMIT]:
+        if not isinstance(rec, dict):
+            continue
+        thread_id = str(rec.get("thread_id") or "").strip()
+        root_chat_id = str(rec.get("chat_id") or "").strip()
+        chat_title = str(rec.get("chat_title") or root_chat_id or thread_id)
+        if not thread_id:
+            continue
+        page_token = None
+        thread_record: Dict[str, Any] = {
+            "thread_id": thread_id,
+            "chat_id": root_chat_id,
+            "chat_title": chat_title,
+            "pages": [],
+            "normalized_count": 0,
+        }
+        try:
+            while True:
+                data = client.list_im_messages_by_container(
+                    container_id_type="thread",
+                    container_id=thread_id,
+                    page_size=50,
+                    page_token=page_token,
+                    sort_type="ByCreateTimeAsc",
+                )
+                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+                raw_items = _extract_items_from_api_payload(data)
+                thread_record["pages"].append(data)
+                for message in raw_items:
+                    created_dt = parse_dt(message.get("create_time") or message.get("created_at") or message.get("createTime"))
+                    if created_dt is not None and not (since <= created_dt <= until):
+                        continue
+                    # Ensure chat/thread identity is preserved even if
+                    # Feishu omits chat_id inside a thread container.
+                    if root_chat_id and not message.get("chat_id"):
+                        message = dict(message)
+                        message["chat_id"] = root_chat_id
+                    item = normalize_feishu_message_item(
+                        root_chat_id or thread_id,
+                        f"{chat_title} / thread:{thread_id}",
+                        message,
+                        cache_path,
+                        assignee_user_id=assignee_user_id,
+                        source_type="feishu_cloud_thread_message",
+                    )
+                    if item:
+                        items.append(item)
+                        thread_record["normalized_count"] += 1
+                has_more = bool(payload_data.get("has_more"))
+                page_token = str(payload_data.get("page_token") or "").strip() or None
+                if not has_more or not page_token:
+                    break
+            summary_thread_success += 1
+            if thread_record["normalized_count"]:
+                summary_thread_message_count += int(thread_record["normalized_count"])
+        except FeishuApiError as exc:
+            summary_thread_failed += 1
+            thread_record["error"] = str(exc)
+            thread_record["response"] = exc.payload
+            diagnostics.append({
+                "source": "im.v1.thread_messages.error",
+                "ok": False,
+                "thread_id_redacted": redact_identifier(thread_id),
+                "chat_id_redacted": redact_identifier(root_chat_id),
+                "error": str(exc),
+                "response": exc.payload,
+                "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
+                "cache_path": str(cache_path),
+            })
+        thread_records.append(thread_record)
+    cache_payload["threads"] = thread_records
+
     if state_dir is not None:
         save_im_bad_chats(state_dir, bad_payload)
+        save_im_threads(state_dir, thread_payload)
     diagnostics.append(
         {
             "source": "im.v1.messages.summary",
@@ -583,6 +842,15 @@ def collect_feishu_cloud_chat_items(
             "failed_chats": summary_failed_chats,
             "chats_with_messages": summary_chats_with_messages,
             "message_count": summary_message_count,
+            "thread_discovery_lookback_hours": THREAD_DISCOVERY_LOOKBACK_HOURS,
+            "thread_discovery_chats_scanned": discovery_chats_scanned,
+            "thread_discovery_errors": discovery_errors,
+            "thread_discovery_new_threads": max(0, after_threads - before_threads),
+            "thread_candidates": len(thread_candidates),
+            "thread_scanned": len(thread_records),
+            "thread_success": summary_thread_success,
+            "thread_failed": summary_thread_failed,
+            "thread_message_count": summary_thread_message_count,
             "skipped_blacklisted": summary_skipped_blacklisted,
             "skipped_chat_id_samples": [redact_identifier(c) for c in skipped_chat_ids[:5]],
             "message_chat_samples": summary_message_samples[:20],

@@ -1341,18 +1341,51 @@ class FeishuClient:
         page_size: int = 50,
         page_token: Optional[str] = None,
     ) -> Dict[str, Any]:
+        return self.list_im_messages_by_container(
+            container_id_type="chat",
+            container_id=chat_id,
+            start_time=start_time,
+            end_time=end_time,
+            page_size=page_size,
+            page_token=page_token,
+        )
+
+    def list_im_messages_by_container(
+        self,
+        container_id_type: str,
+        container_id: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        page_size: int = 50,
+        page_token: Optional[str] = None,
+        sort_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List IM messages by chat or thread container.
+
+        Feishu's ``/im/v1/messages`` supports two container types:
+        ``chat`` and ``thread``. ``chat`` supports start/end time
+        filters. ``thread`` does *not* support start/end time filters
+        (per docs), so callers must filter returned messages locally by
+        ``create_time``. This helper exists so collect.py can include
+        topic/thread replies in addition to the normal chat timeline.
+        """
+
         params: Dict[str, Any] = {
-            "container_id_type": "chat",
-            "container_id": chat_id,
-            "start_time": start_time,
-            "end_time": end_time,
+            "container_id_type": container_id_type,
+            "container_id": container_id,
             "page_size": page_size,
             "page_token": page_token,
             "user_id_type": "open_id",
         }
+        if start_time is not None and container_id_type != "thread":
+            params["start_time"] = start_time
+        if end_time is not None and container_id_type != "thread":
+            params["end_time"] = end_time
+        if sort_type:
+            params["sort_type"] = sort_type
         data = self.get_json("/im/v1/messages", params=params)
         if data.get("code") not in (None, 0):
-            raise FeishuApiError("Failed to list Feishu IM messages", data)
+            raise FeishuApiError(f"Failed to list Feishu IM messages ({container_id_type})", data)
         return data
 
 

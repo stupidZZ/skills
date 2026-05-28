@@ -3,6 +3,82 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.10 – collect Feishu topic/thread replies
+
+User report: they @mentioned themselves inside a Feishu **话题 / topic**
+reply ("@ZZ 记得看一下这个文档。" under the "测试中心需求" topic in
+"VidMuse评测调优"), but the hourly heartbeat reported 0 @me and did
+not create a task. Investigation showed the message was not present
+in ``output/collected/latest.json`` at all. The time window covered
+it; ``default_assignee_open_id`` was correct; mention parsing would
+have matched it if the message had been collected. Root cause was
+collection coverage: the skill only queried normal chat containers.
+
+Feishu docs for ``/im/v1/messages`` explicitly state:
+
+> For topic messages in normal groups, ``container_id_type=chat`` only
+> guarantees the topic root message. Use ``container_id_type=thread``
+> and ``container_id=<thread_id>`` to retrieve all messages in the
+> topic replies. Thread containers do not support start/end time
+> filters, so clients must filter locally by ``create_time``.
+
+Changes:
+
+* ``FeishuClient`` gains ``list_im_messages_by_container``. The
+  existing ``list_im_messages(chat_id, start_time, end_time, ...)``
+  now delegates to it with ``container_id_type=chat``. The new helper
+  also supports ``container_id_type=thread`` without start/end query
+  params, plus optional ``sort_type``.
+
+* ``collect.py`` now maintains ``state/im-thread-candidates.json``:
+  a rolling 3-day map of ``thread_id -> {chat_id, chat_title,
+  root_id, first_seen_at, last_seen_at}``. The normal chat scan calls
+  ``remember_im_thread`` for every raw message that carries a
+  ``thread_id``.
+
+* Cold-start support: on first 0.3.10 run, if no thread state exists,
+  collect seeds the map from recent ``output/feishu-chat-cache/*.json``
+  files. This lets upgraded users benefit from thread collection
+  immediately instead of waiting until a future topic root appears in
+  the hourly window.
+
+* Thread discovery pass: each collect run scans recent chat history
+  over a bounded 48h window (``THREAD_DISCOVERY_LOOKBACK_HOURS``)
+  purely to discover topic roots / thread IDs that may have been
+  created before the current ``since-last-success`` window. This fixes
+  the exact missed case: root at ~11:26, reply at 16:14, hourly window
+  16:04-17:00.
+
+* Thread message pass: collect queries up to
+  ``THREAD_SCAN_LIMIT`` recent thread candidates via
+  ``/im/v1/messages?container_id_type=thread&container_id=<thread_id>``
+  and filters returned messages locally by ``since <= create_time <=
+  until``. Matched replies are normalised as
+  ``source_type = feishu_cloud_thread_message`` with metadata
+  ``thread_id``, ``thread_message_position``, ``root_id`` and
+  ``parent_id``. Existing deduplication by Feishu ``message_id``
+  prevents double counting when the chat API already returned a reply.
+
+* Diagnostics / heartbeat:
+  ``im.v1.messages.summary`` now includes
+  ``thread_discovery_lookback_hours``, ``thread_discovery_chats_scanned``,
+  ``thread_discovery_errors``, ``thread_discovery_new_threads``,
+  ``thread_candidates``, ``thread_scanned``, ``thread_success``,
+  ``thread_failed`` and ``thread_message_count``. ``prompts/heartbeat.md``
+  adds a short "话题 / thread 采集状态" section and tells the agent how
+  to surface thread API errors.
+
+Verified locally against the live Feishu app using a temp state/output
+folder and the real ``VidMuse评测调优`` chat ID: a 4-hour collection
+window now returns the previously missed message as
+``source_type=feishu_cloud_thread_message`` with
+``mentioned_assignee=true``, ``thread_id=omt_19723d2bc58fdb87`` and
+text ``@ZZ 记得看一下这个文档。``. The thread summary showed
+``thread_candidates=26``, ``thread_scanned=26``, ``thread_failed=0``
+and ``thread_message_count=15``.
+
+Bumped SKILL.md to 0.3.10; top-level README skill row to 0.3.10.
+
 ## 0.3.9 – require background Agent model alignment with the main Agent
 
 Operational fix after a real incident: manual execution by the main
