@@ -155,7 +155,8 @@ def remember_im_thread(payload: Dict[str, Any], message: Dict[str, Any], chat_id
         return
     threads = payload.setdefault("threads", {})
     rec = threads.get(thread_id) if isinstance(threads.get(thread_id), dict) else {}
-    root_id = str(message.get("root_id") or message.get("parent_id") or message.get("message_id") or "")
+    message_id = str(message.get("message_id") or message.get("messageId") or message.get("id") or "")
+    root_id = str(message.get("root_id") or message.get("parent_id") or message_id or "")
     rec.update({
         "thread_id": thread_id,
         "chat_id": chat_id,
@@ -163,6 +164,25 @@ def remember_im_thread(payload: Dict[str, Any], message: Dict[str, Any], chat_id
         "root_id": root_id or rec.get("root_id"),
         "last_seen_at": now.isoformat(),
     })
+
+    # 0.3.11: keep a small, human-readable copy of the topic root message.
+    # Feishu thread replies often say "this/new plan" and rely on the root
+    # message for the real object (file name, link, case id, etc.). If the
+    # Agent only sees the reply, it can create useless Todo titles such as
+    # "look at the new plan". Persisting the root summary lets later thread
+    # reply items carry enough context to generate grounded task titles.
+    if message_id and root_id and message_id == root_id:
+        body = message.get("body") if isinstance(message.get("body"), dict) else {}
+        root_text = parse_feishu_message_content(body.get("content") if body else message.get("content"))
+        if root_text:
+            root_text = replace_mention_placeholders(root_text, extract_feishu_message_mentions(message))
+            rec["root_text"] = root_text[:1000]
+        rec["root_message_id"] = message_id
+        rec["root_message_type"] = str(message.get("message_type") or message.get("msg_type") or "")
+        root_created = parse_dt(message.get("create_time") or message.get("created_at") or message.get("createTime"))
+        if root_created:
+            rec["root_created_at"] = root_created.isoformat()
+
     rec.setdefault("first_seen_at", now.isoformat())
     threads[thread_id] = rec
 
@@ -453,7 +473,13 @@ def parse_feishu_message_content(content: Any) -> str:
                 return
             if isinstance(value.get("text"), str):
                 add(value.get("text"))
-            for key in ("title", "content", "zh_cn", "en_us", "elements", "children"):
+            # Feishu file messages are shaped like
+            # {"file_key":"...","file_name":"test-center-v2-design.html"}.
+            # Keeping the file name in normalized text is important because
+            # replies often refer to it only as "this/new plan".
+            if isinstance(value.get("file_name"), str):
+                add(value.get("file_name"))
+            for key in ("title", "content", "zh_cn", "en_us", "elements", "children", "href", "url"):
                 if key in value:
                     visit(value.get(key))
         elif isinstance(value, list):
@@ -502,6 +528,34 @@ def replace_mention_placeholders(text: str, mentions: Sequence[Dict[str, Any]]) 
     return result
 
 
+def build_thread_context(rec: Optional[Dict[str, Any]], *, max_chars: int = 1200) -> Optional[Dict[str, Any]]:
+    """Return compact topic-root context for a thread reply item.
+
+    This is intentionally metadata, not appended to ``text``: the Agent
+    should know which bits are the reply itself and which bits are grounding
+    context from the root message. The context is still written into
+    ``latest.json`` so the hourly prompt can require grounded Todo titles.
+    """
+
+    if not isinstance(rec, dict):
+        return None
+    root_text = str(rec.get("root_text") or "").strip()
+    root_message_id = str(rec.get("root_message_id") or rec.get("root_id") or "").strip()
+    root_message_type = str(rec.get("root_message_type") or "").strip()
+    if not root_text and not root_message_id:
+        return None
+    context: Dict[str, Any] = {}
+    if root_text:
+        context["root_text"] = root_text[:max_chars]
+    if root_message_id:
+        context["root_message_id"] = root_message_id
+    if root_message_type:
+        context["root_message_type"] = root_message_type
+    if rec.get("root_created_at"):
+        context["root_created_at"] = rec.get("root_created_at")
+    return context or None
+
+
 def redact_identifier(value: Any, head: int = 8, tail: int = 4) -> str:
     text = str(value or "")
     if len(text) <= head + tail + 1:
@@ -516,6 +570,7 @@ def normalize_feishu_message_item(
     cache_path: Path,
     assignee_user_id: Optional[str] = None,
     source_type: str = "feishu_cloud_message",
+    thread_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     message_id = str(message.get("message_id") or message.get("messageId") or message.get("id") or "")
     if not message_id:
@@ -541,6 +596,20 @@ def normalize_feishu_message_item(
     thread_message_position = str(message.get("thread_message_position") or "").strip() or None
     root_id = str(message.get("root_id") or "").strip() or None
     parent_id = str(message.get("parent_id") or "").strip() or None
+    metadata = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "sender_id": sender_id,
+        "message_type": str(message.get("message_type") or message.get("msg_type") or ""),
+        "mentions": mentions,
+        "mentioned_assignee": mentioned_assignee,
+        "thread_id": thread_id,
+        "thread_message_position": thread_message_position,
+        "root_id": root_id,
+        "parent_id": parent_id,
+    }
+    if thread_context:
+        metadata["thread_context"] = thread_context
     return {
         "id": f"{source_type}:{chat_id}:{message_id}",
         "source_type": source_type,
@@ -552,18 +621,7 @@ def normalize_feishu_message_item(
         "text": text,
         "created_at": created_dt.isoformat() if created_dt else str(created_at or ""),
         "updated_at": updated_dt.isoformat() if updated_dt else str(updated_at or created_at or ""),
-        "metadata": {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "sender_id": sender_id,
-            "message_type": str(message.get("message_type") or message.get("msg_type") or ""),
-            "mentions": mentions,
-            "mentioned_assignee": mentioned_assignee,
-            "thread_id": thread_id,
-            "thread_message_position": thread_message_position,
-            "root_id": root_id,
-            "parent_id": parent_id,
-        },
+        "metadata": metadata,
     }
 
 
@@ -802,6 +860,7 @@ def collect_feishu_cloud_chat_items(
                         cache_path,
                         assignee_user_id=assignee_user_id,
                         source_type="feishu_cloud_thread_message",
+                        thread_context=build_thread_context(rec),
                     )
                     if item:
                         items.append(item)

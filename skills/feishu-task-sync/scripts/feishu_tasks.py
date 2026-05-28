@@ -122,6 +122,71 @@ def extract_urls(text: str) -> List[str]:
     return urls
 
 
+VAGUE_TITLE_PATTERNS = [
+    r"新的?方案",
+    r"这个方案",
+    r"这(?:个|件)?事(?:情)?",
+    r"这个问题",
+    r"这个case",
+    r"这个链接",
+    r"看(?:一下|下)?这个",
+]
+GROUNDING_PATTERNS = [
+    # File names / attachments, e.g. test-center-v2-design.html
+    r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}\.(?:html?|md|docx?|pdf|xlsx?|pptx?|json|yaml|yml|txt|png|jpe?g|gif|webp)",
+    # Internal case / thread identifiers and explicit URLs often carry the
+    # missing object when the title says only "this plan/problem".
+    r"case_[A-Za-z0-9_-]+",
+    r"thread/[A-Za-z0-9_-]+",
+    r"https?://[^\s)）\]>]+",
+]
+
+
+def is_vague_todo_title(title: str) -> bool:
+    return any(re.search(pattern, title or "", flags=re.IGNORECASE) for pattern in VAGUE_TITLE_PATTERNS)
+
+
+def extract_grounding_entities(text: str) -> List[str]:
+    entities: List[str] = []
+    for pattern in GROUNDING_PATTERNS:
+        for match in re.finditer(pattern, text or "", flags=re.IGNORECASE):
+            value = match.group(0).rstrip(".,，。；;:：!！?？")
+            if value and value not in entities:
+                entities.append(value)
+    return entities
+
+
+def todo_grounding_entities(todo: Dict[str, Any]) -> List[str]:
+    texts = [str(todo.get("title") or ""), str(todo.get("description") or "")]
+    source_refs = todo.get("source_refs")
+    if isinstance(source_refs, list):
+        for ref in source_refs:
+            if not isinstance(ref, dict):
+                continue
+            for key in ("source_url", "file_path", "id"):
+                if ref.get(key):
+                    texts.append(str(ref.get(key)))
+    return extract_grounding_entities("\n".join(texts))
+
+
+def validate_todo_grounding(todo: Dict[str, Any]) -> Optional[str]:
+    """Reject pronoun-only Todo titles before they reach Feishu Tasks.
+
+    The Agent prompt is the first line of defence, but creation is the last
+    safe place to prevent another inscrutable task from appearing in the
+    user's list. If a title contains vague demonstratives, require a concrete
+    object somewhere in title/description/source refs.
+    """
+
+    title = str(todo.get("title") or "")
+    if not is_vague_todo_title(title):
+        return None
+    entities = todo_grounding_entities(todo)
+    if entities:
+        return None
+    return "vague-title-missing-grounding: title uses demonstratives such as 'new/this plan/problem' but no file/link/case/thread object was found"
+
+
 def redact_identifier(value: Any, head: int = 8, tail: int = 4) -> str:
     text = str(value or "")
     if len(text) <= head + tail + 1:
@@ -366,6 +431,20 @@ def command_create(args: argparse.Namespace) -> int:
         existing = processed.get(fingerprint)
         if isinstance(existing, dict) and existing.get("status") in SKIP_STATUSES:
             skipped.append({"fingerprint": fingerprint, "title": title, "reason": f"already-{existing.get('status')}"})
+            continue
+        grounding_error = validate_todo_grounding(todo)
+        if grounding_error:
+            skipped.append({"fingerprint": fingerprint, "title": title, "reason": grounding_error})
+            processed[fingerprint] = {
+                "status": "skipped-vague-title",
+                "title": title,
+                "description": build_task_description(todo),
+                "due_at": todo.get("due_at"),
+                "source_refs": todo.get("source_refs") or [],
+                "confidence": todo.get("confidence"),
+                "error": grounding_error,
+                "updated_at": now.isoformat(),
+            }
             continue
         try:
             task_description = build_task_description(todo)

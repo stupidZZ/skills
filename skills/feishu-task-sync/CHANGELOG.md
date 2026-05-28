@@ -3,6 +3,56 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.11 – ground vague Todo titles in thread context
+
+User report: SmartZZ created a Feishu task titled
+``和鼎鼎一起看新的方案``. The task was technically backed by a real @ZZ
+message, but the title was useless outside the chat because "新的方案"
+referred to a topic root attachment. Looking at the thread showed the
+actual object was ``test-center-v2-design.html``.
+
+Changes:
+
+* ``collect.py`` now preserves compact topic-root context in
+  ``state/im-thread-candidates.json`` when it sees a root message:
+  ``root_text``, ``root_message_id``, ``root_message_type`` and
+  ``root_created_at``. Feishu file messages now contribute
+  ``file_name`` to normalized text, so attachments such as
+  ``test-center-v2-design.html`` are available as grounding evidence.
+
+* Thread reply items now carry ``metadata.thread_context`` into
+  ``output/collected/latest.json``. The reply text remains unchanged,
+  but the Agent can see the root attachment / link / title that
+  resolves pronouns like "这个方案" or "这个问题".
+
+* ``prompts/agent-hourly.md`` adds a strict title rule: Todo titles
+  must be understandable without opening the chat. If the source says
+  "这个/新的方案", "这个问题", "这个事情", "这个 case", "这个链接" or
+  similar, the Agent must include a concrete object from
+  ``metadata.thread_context.root_text``, a file name, link text/URL,
+  case/thread ID, document title or nearby context. If no object can be
+  found, it must skip task creation rather than create a vague Todo.
+
+* ``feishu_tasks.py create`` now has a last-line guard. It rejects
+  vague demonstrative titles that do not contain or reference a file,
+  URL, case ID or thread ID in the title/description/source refs,
+  recording them as ``skipped-vague-title`` instead of creating a task.
+
+* Added ``scripts/replay_vague_title_guard.py``, an offline regression
+  replay for the ``test-center-v2-design.html`` case. It verifies that
+  collector normalization captures root context, an ungrounded title
+  is rejected, and the grounded title
+  ``看 test-center-v2-design.html 新方案，并和鼎鼎/方荣反馈意见`` passes.
+
+Verified locally with:
+
+```bash
+python3 scripts/replay_vague_title_guard.py
+python3 -m py_compile scripts/collect.py scripts/feishu_tasks.py scripts/bootstrap.py scripts/sync_feishu_tasks.py scripts/runtime.py scripts/replay_vague_title_guard.py
+```
+
+Bumped SKILL.md to 0.3.11.
+
 ## 0.3.10 – collect Feishu topic/thread replies
 
 User report: they @mentioned themselves inside a Feishu **话题 / topic**
