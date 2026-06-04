@@ -7,9 +7,10 @@ import math
 import re
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sync_feishu_tasks import (
     TZ,
@@ -125,9 +126,16 @@ def load_cursor(path: Path) -> Dict[str, Any]:
 IM_BAD_CHAT_DEFAULT_ERROR_CODES = {230001}
 IM_BAD_CHAT_FAILURE_THRESHOLD = 3  # n consecutive failures before skipping
 THREAD_STATE_RETENTION_DAYS = 3
-THREAD_SCAN_LIMIT = 200
+THREAD_SCAN_LIMIT = 120
+THREAD_SCAN_PAGE_LIMIT = 5
 THREAD_DISCOVERY_LOOKBACK_HOURS = 48
-THREAD_DISCOVERY_CHAT_LIMIT = 500
+# Full discovery is intentionally bounded and only runs when no thread
+# state exists. Running a 48h discovery over all chats every hour caused
+# collect to exceed 300s on tenants with hundreds of chats. Normal hourly
+# operation should rely on remembered thread ids + roots seen in the
+# current chat window.
+THREAD_DISCOVERY_CHAT_LIMIT = 120
+IM_FETCH_WORKERS = 24
 
 
 def _im_bad_chats_path(state_dir: Path) -> Path:
@@ -625,6 +633,50 @@ def normalize_feishu_message_item(
     }
 
 
+def _fetch_chat_messages_for_collect(
+    client: FeishuClient,
+    chat_id: str,
+    chat_title: str,
+    since: datetime,
+    until: datetime,
+    cache_path: Path,
+    assignee_user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Fetch one chat's messages; safe to run in a thread pool."""
+
+    page_token: Optional[str] = None
+    chat_record: Dict[str, Any] = {"chat_id": chat_id, "pages": [], "normalized_count": 0}
+    items: List[Dict[str, Any]] = []
+    raw_messages: List[Dict[str, Any]] = []
+    while True:
+        data = client.list_im_messages(
+            chat_id=chat_id,
+            start_time=int(since.timestamp()),
+            end_time=int(until.timestamp()),
+            page_size=50,
+            page_token=page_token,
+        )
+        payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        raw_items = _extract_items_from_api_payload(data)
+        chat_record["pages"].append(data)
+        raw_messages.extend([m for m in raw_items if isinstance(m, dict)])
+        for message in raw_items:
+            item = normalize_feishu_message_item(
+                chat_id,
+                chat_title,
+                message,
+                cache_path,
+                assignee_user_id=assignee_user_id,
+            )
+            if item:
+                items.append(item)
+                chat_record["normalized_count"] += 1
+        page_token = str(payload_data.get("page_token") or "").strip() or None
+        if not bool(payload_data.get("has_more")) or not page_token:
+            break
+    return {"chat_id": chat_id, "chat_title": chat_title, "chat_record": chat_record, "items": items, "raw_messages": raw_messages}
+
+
 def collect_feishu_cloud_chat_items(
     client: FeishuClient,
     chat_ids: Sequence[str],
@@ -671,65 +723,66 @@ def collect_feishu_cloud_chat_items(
         diagnostics.append({"source": "im.v1.messages", "ok": False, "error": "missing chat_id", "count": 0})
         JsonStore.save(cache_path, cache_payload)
         return items
+    active_chat_ids: List[str] = []
+    fetch_targets: List[Tuple[str, str]] = []
     for chat_id in chat_ids:
         if _im_bad_should_skip(bad_payload, chat_id):
             summary_skipped_blacklisted += 1
             skipped_chat_ids.append(chat_id)
-            cache_payload["chats"].append(
-                {"chat_id": chat_id, "skipped": "im_bad_chats blacklist"}
-            )
+            cache_payload["chats"].append({"chat_id": chat_id, "skipped": "im_bad_chats blacklist"})
             continue
-        page_token: Optional[str] = None
-        chat_record: Dict[str, Any] = {"chat_id": chat_id, "pages": [], "normalized_count": 0}
-        try:
-            while True:
-                data = client.list_im_messages(
-                    chat_id=chat_id,
-                    start_time=int(since.timestamp()),
-                    end_time=int(until.timestamp()),
-                    page_size=50,
-                    page_token=page_token,
-                )
-                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
-                raw_items = _extract_items_from_api_payload(data)
-                chat_record["pages"].append(data)
-                for message in raw_items:
-                    chat_title = chat_titles.get(chat_id, chat_id)
+        fetch_targets.append((chat_id, chat_titles.get(chat_id, chat_id)))
+
+    # Fetch per-chat message windows concurrently. The previous
+    # sequential loop could take 120-300s on tenants with ~400 chats;
+    # OpenAPI allows much higher QPS, so 12 workers keeps hourly
+    # collection within the scheduler budget while staying conservative.
+    with ThreadPoolExecutor(max_workers=IM_FETCH_WORKERS) as executor:
+        future_map = {
+            executor.submit(
+                _fetch_chat_messages_for_collect,
+                client,
+                chat_id,
+                chat_title,
+                since,
+                until,
+                cache_path,
+                assignee_user_id,
+            ): (chat_id, chat_title)
+            for chat_id, chat_title in fetch_targets
+        }
+        for fut in as_completed(future_map):
+            chat_id, chat_title = future_map[fut]
+            try:
+                result = fut.result()
+                chat_record = result["chat_record"]
+                for message in result.get("raw_messages") or []:
                     remember_im_thread(thread_payload, message, chat_id, chat_title, now)
-                    item = normalize_feishu_message_item(chat_id, chat_title, message, cache_path, assignee_user_id=assignee_user_id)
-                    if item:
-                        items.append(item)
-                        chat_record["normalized_count"] += 1
-                has_more = bool(payload_data.get("has_more"))
-                page_token = str(payload_data.get("page_token") or "").strip() or None
-                if not has_more or not page_token:
-                    break
-            summary_success_chats += 1
-            _im_bad_clear_success(bad_payload, chat_id)
-            if chat_record["normalized_count"]:
-                summary_chats_with_messages += 1
-                summary_message_count += int(chat_record["normalized_count"])
-                summary_message_samples.append(
-                    {
+                for item in result.get("items") or []:
+                    items.append(item)
+                summary_success_chats += 1
+                _im_bad_clear_success(bad_payload, chat_id)
+                if chat_record["normalized_count"]:
+                    active_chat_ids.append(chat_id)
+                    summary_chats_with_messages += 1
+                    summary_message_count += int(chat_record["normalized_count"])
+                    summary_message_samples.append({
                         "chat_id_redacted": redact_identifier(chat_id),
-                        "chat_title": chat_titles.get(chat_id) or redact_identifier(chat_id),
+                        "chat_title": chat_title or redact_identifier(chat_id),
                         "count": chat_record["normalized_count"],
-                    }
-                )
-        except FeishuApiError as exc:
-            chat_record["error"] = str(exc)
-            chat_record["response"] = exc.payload
-            summary_failed_chats += 1
-            code = None
-            msg = ""
-            if isinstance(exc.payload, dict):
-                code = exc.payload.get("code")
-                msg = str(exc.payload.get("msg") or "")
-            if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES:
-                record = _im_bad_record_failure(bad_payload, chat_id, code, msg, now)
-                chat_record["bad_chat_failures"] = record.get("failures")
-            diagnostics.append(
-                {
+                    })
+            except FeishuApiError as exc:
+                chat_record = {"chat_id": chat_id, "pages": [], "normalized_count": 0, "error": str(exc), "response": exc.payload}
+                summary_failed_chats += 1
+                code = None
+                msg = ""
+                if isinstance(exc.payload, dict):
+                    code = exc.payload.get("code")
+                    msg = str(exc.payload.get("msg") or "")
+                if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES:
+                    record = _im_bad_record_failure(bad_payload, chat_id, code, msg, now)
+                    chat_record["bad_chat_failures"] = record.get("failures")
+                diagnostics.append({
                     "source": "im.v1.messages.error",
                     "ok": False,
                     "chat_id_redacted": redact_identifier(chat_id),
@@ -739,64 +792,69 @@ def collect_feishu_cloud_chat_items(
                     "cache_path": str(cache_path),
                     "will_blacklist_after": IM_BAD_CHAT_FAILURE_THRESHOLD if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES else None,
                     "current_failure_count": int(((bad_payload.get("chats") or {}).get(chat_id) or {}).get("failures") or 0) if code in IM_BAD_CHAT_DEFAULT_ERROR_CODES else None,
-                }
-            )
-        cache_payload["chats"].append(chat_record)
+                })
+            except Exception as exc:
+                chat_record = {"chat_id": chat_id, "pages": [], "normalized_count": 0, "error": str(exc)}
+                summary_failed_chats += 1
+                diagnostics.append({
+                    "source": "im.v1.messages.error",
+                    "ok": False,
+                    "chat_id_redacted": redact_identifier(chat_id),
+                    "error": str(exc),
+                    "cache_path": str(cache_path),
+                })
+            cache_payload["chats"].append(chat_record)
 
     # Thread discovery pass.
     #
-    # If a topic root message was created before the current hourly
-    # window, the normal ``since-last-success`` chat scan will not see
-    # that root, so we would never learn its thread_id and therefore
-    # could not fetch replies posted inside the current window. To
-    # reduce that blind spot, scan a wider recent chat history window
-    # purely for ``thread_id`` metadata (no item normalisation). This is
-    # bounded by THREAD_DISCOVERY_* constants and persisted to
-    # state/im-thread-candidates.json.
-    # Wider than the main window: if since is 17:00 but a thread root
-    # was created at 11:00 and replied to at 17:30, using max(...) here
-    # would still miss the root thread_id. Use min(...) so discovery
-    # looks back up to THREAD_DISCOVERY_LOOKBACK_HOURS.
+    # Expensive full discovery (48h lookback over many chats) is only
+    # necessary on cold state. Once state/im-thread-candidates.json has
+    # thread ids, normal hourly runs remember new roots from the current
+    # chat window and only scan known threads. This avoids the 0.3.10
+    # performance regression where every hourly collect doubled API
+    # traffic and could exceed 300s on tenants with hundreds of chats.
     discovery_since = min(since, now - timedelta(hours=THREAD_DISCOVERY_LOOKBACK_HOURS))
     discovery_chats_scanned = 0
     discovery_errors = 0
     before_threads = len(thread_payload.get("threads") or {})
-    for chat_id in list(chat_ids)[:THREAD_DISCOVERY_CHAT_LIMIT]:
-        if _im_bad_should_skip(bad_payload, chat_id):
-            continue
-        discovery_chats_scanned += 1
-        page_token = None
-        try:
-            while True:
-                data = client.list_im_messages(
-                    chat_id=chat_id,
-                    start_time=int(discovery_since.timestamp()),
-                    end_time=int(until.timestamp()),
-                    page_size=50,
-                    page_token=page_token,
-                )
-                payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
-                for message in _extract_items_from_api_payload(data):
-                    remember_im_thread(
-                        thread_payload,
-                        message,
-                        chat_id,
-                        chat_titles.get(chat_id, chat_id),
-                        now,
+    should_run_full_discovery = before_threads == 0
+    if should_run_full_discovery:
+        for chat_id in list(chat_ids)[:THREAD_DISCOVERY_CHAT_LIMIT]:
+            if _im_bad_should_skip(bad_payload, chat_id):
+                continue
+            discovery_chats_scanned += 1
+            page_token = None
+            try:
+                while True:
+                    data = client.list_im_messages(
+                        chat_id=chat_id,
+                        start_time=int(discovery_since.timestamp()),
+                        end_time=int(until.timestamp()),
+                        page_size=50,
+                        page_token=page_token,
                     )
-                page_token = str(payload_data.get("page_token") or "").strip() or None
-                if not bool(payload_data.get("has_more")) or not page_token:
-                    break
-        except FeishuApiError as exc:
-            discovery_errors += 1
-            diagnostics.append({
-                "source": "im.v1.thread_discovery.error",
-                "ok": False,
-                "chat_id_redacted": redact_identifier(chat_id),
-                "error": str(exc),
-                "response": exc.payload,
-                "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
-            })
+                    payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+                    for message in _extract_items_from_api_payload(data):
+                        remember_im_thread(
+                            thread_payload,
+                            message,
+                            chat_id,
+                            chat_titles.get(chat_id, chat_id),
+                            now,
+                        )
+                    page_token = str(payload_data.get("page_token") or "").strip() or None
+                    if not bool(payload_data.get("has_more")) or not page_token:
+                        break
+            except FeishuApiError as exc:
+                discovery_errors += 1
+                diagnostics.append({
+                    "source": "im.v1.thread_discovery.error",
+                    "ok": False,
+                    "chat_id_redacted": redact_identifier(chat_id),
+                    "error": str(exc),
+                    "response": exc.payload,
+                    "missing_scopes": feishu_api_missing_scopes(exc.payload, FEISHU_IM_SCOPE_HINTS),
+                })
     after_threads = len(thread_payload.get("threads") or {})
 
     # Second pass: topic / thread replies.
@@ -833,20 +891,26 @@ def collect_feishu_cloud_chat_items(
             "normalized_count": 0,
         }
         try:
+            page_count = 0
             while True:
+                page_count += 1
                 data = client.list_im_messages_by_container(
                     container_id_type="thread",
                     container_id=thread_id,
                     page_size=50,
                     page_token=page_token,
-                    sort_type="ByCreateTimeAsc",
+                    sort_type="ByCreateTimeDesc",
                 )
                 payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
                 raw_items = _extract_items_from_api_payload(data)
                 thread_record["pages"].append(data)
+                saw_older_than_window = False
                 for message in raw_items:
                     created_dt = parse_dt(message.get("create_time") or message.get("created_at") or message.get("createTime"))
-                    if created_dt is not None and not (since <= created_dt <= until):
+                    if created_dt is not None and created_dt < since:
+                        saw_older_than_window = True
+                        continue
+                    if created_dt is not None and created_dt > until:
                         continue
                     # Ensure chat/thread identity is preserved even if
                     # Feishu omits chat_id inside a thread container.
@@ -867,7 +931,9 @@ def collect_feishu_cloud_chat_items(
                         thread_record["normalized_count"] += 1
                 has_more = bool(payload_data.get("has_more"))
                 page_token = str(payload_data.get("page_token") or "").strip() or None
-                if not has_more or not page_token:
+                if saw_older_than_window or page_count >= THREAD_SCAN_PAGE_LIMIT or not has_more or not page_token:
+                    if page_count >= THREAD_SCAN_PAGE_LIMIT and has_more and page_token:
+                        thread_record["truncated"] = f"page_limit_{THREAD_SCAN_PAGE_LIMIT}"
                     break
             summary_thread_success += 1
             if thread_record["normalized_count"]:
@@ -902,6 +968,8 @@ def collect_feishu_cloud_chat_items(
             "chats_with_messages": summary_chats_with_messages,
             "message_count": summary_message_count,
             "thread_discovery_lookback_hours": THREAD_DISCOVERY_LOOKBACK_HOURS,
+            "thread_full_discovery_ran": should_run_full_discovery,
+            "thread_scan_page_limit": THREAD_SCAN_PAGE_LIMIT,
             "thread_discovery_chats_scanned": discovery_chats_scanned,
             "thread_discovery_errors": discovery_errors,
             "thread_discovery_new_threads": max(0, after_threads - before_threads),

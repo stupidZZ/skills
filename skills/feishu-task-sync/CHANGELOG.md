@@ -3,6 +3,60 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.12 – bound thread collection cost and parallelise chat scanning
+
+Follow-up to the 0.3.10 topic/thread support. A real hourly run on a
+tenant with ~380 chats timed out twice (120s, then 300s). The partial
+cache file showed that normal chat fetching plus thread handling had
+completed enough to write ``output/feishu-chat-cache/feishu-chat-*.json``
+but the overall collect command never reached ``output/collected/latest.json``.
+Root cause was a performance regression introduced by 0.3.10:
+
+- Every hourly run performed a 48h "thread discovery" scan over up to
+  500 chats to find topic roots, doubling the number of IM history
+  calls.
+- Thread containers were fetched sequentially in ascending order. Since
+  Feishu thread containers do not support start/end filters, long-lived
+  threads could require walking many old pages before the current
+  window was determined.
+- Normal per-chat message fetching was also sequential, making the
+  300+ chat baseline fragile on slow Feishu/network responses.
+
+Fixes:
+
+- Full 48h thread discovery now runs **only on cold state** (no
+  ``state/im-thread-candidates.json`` / no remembered threads). Normal
+  hourly runs rely on remembered thread ids plus roots observed in the
+  current chat window. This preserves the one-time upgrade/bootstrap
+  benefit without paying the cost every hour.
+- ``THREAD_DISCOVERY_CHAT_LIMIT`` reduced from 500 to 120; it is now a
+  cold-start safety valve rather than an hourly tax.
+- Thread fetching switched to ``sort_type=ByCreateTimeDesc`` with local
+  early-stop: as soon as a page contains messages older than ``since``,
+  later pages are guaranteed older and the thread scan stops. A hard
+  ``THREAD_SCAN_PAGE_LIMIT`` (5 pages) caps pathological long threads.
+- Normal chat fetches are now parallelised with ``ThreadPoolExecutor``
+  (``IM_FETCH_WORKERS=24``). Feishu's documented QPS limit is far above
+  this, and the worker count keeps the typical 300+ chat scan under the
+  scheduler timeout without introducing third-party dependencies.
+- Diagnostics now include ``thread_full_discovery_ran`` and
+  ``thread_scan_page_limit`` so future heartbeats can distinguish an
+  initial cold-start discovery from normal bounded hourly operation.
+
+Validation against the live install with copied OAuth state and
+existing 39 thread candidates:
+
+- Before optimisation: the collect command timed out at 180s in local
+  performance testing.
+- After optimisation: same one-hour window completed in ~94-102s
+  (depending on network), with ``thread_full_discovery_ran=false``,
+  ``thread_discovery_chats_scanned=0``, ``thread_candidates=39``,
+  ``thread_scanned=39``, ``thread_failed=0``. This is still non-trivial
+  but below the 120s scheduler budget and no longer performs the 48h
+  full discovery tax on every run.
+
+Bumped SKILL.md to 0.3.12; top-level README skill row to 0.3.12.
+
 ## 0.3.11 – ground vague Todo titles in thread context
 
 User report: SmartZZ created a Feishu task titled
