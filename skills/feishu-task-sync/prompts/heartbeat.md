@@ -44,7 +44,9 @@
 | 项 | 取值来源 |
 | --- | --- |
 | window since / until | `latest.json.window.since / window.until` |
-| window_mode | `latest.json.window.window_mode` |
+| window_mode | `latest.json.window_mode` |
+| overlap_hours | `latest.json.overlap_hours`（0.3.13+；默认 6，用于重叠回看防漏采）|
+| effective_since | `latest.json.effective_since`（实际回看的起点，通常早于 cursor.last_success_at）|
 | auth_mode_used | `latest.json.auth_checks.auth_mode_used` |
 | user_token_valid | `latest.json.auth_checks.user_auth.is_access_token_valid` |
 | refresh_token_valid | `latest.json.auth_checks.user_auth.is_refresh_token_valid` |

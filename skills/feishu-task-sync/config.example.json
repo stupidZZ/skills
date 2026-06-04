@@ -25,6 +25,9 @@
     "state_success_days": 3,
     "state_failed_days": 14
   },
+  "collection": {
+    "overlap_hours": 6
+  },
   "updates": {
     "check": true,
     "auto_apply_patch_versions": false,

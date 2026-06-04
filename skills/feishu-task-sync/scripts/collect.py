@@ -341,7 +341,7 @@ def mark_cursor_started(path: Path, now: datetime) -> Dict[str, Any]:
     return cursor
 
 
-def compute_window(args: argparse.Namespace, now: datetime, default_cursor_path: Path) -> Dict[str, Any]:
+def compute_window(args: argparse.Namespace, now: datetime, default_cursor_path: Path, overlap_hours: float = 0.0) -> Dict[str, Any]:
     cursor_path = Path(args.cursor_path) if args.cursor_path else default_cursor_path
     max_lookback_days = max(1, int(args.max_lookback_days))
     if args.since_last_success:
@@ -349,13 +349,19 @@ def compute_window(args: argparse.Namespace, now: datetime, default_cursor_path:
         max_since = now - timedelta(days=max_lookback_days)
         cursor_last_success_at = cursor.get("last_success_at")
         last_success = parse_dt(cursor_last_success_at)
-        since = max(last_success, max_since) if last_success else max_since
+        overlap_delta = timedelta(hours=max(0.0, float(overlap_hours or 0.0)))
+        if last_success:
+            since = max(last_success - overlap_delta, max_since)
+        else:
+            since = max_since
         return {
             "since": since,
             "until": now,
-            "window_mode": "since-last-success",
+            "window_mode": "since-last-success-overlap" if last_success and overlap_delta.total_seconds() > 0 else "since-last-success",
             "cursor_path": str(cursor_path),
             "cursor_last_success_at": cursor_last_success_at,
+            "overlap_hours": overlap_delta.total_seconds() / 3600,
+            "effective_since": since.isoformat(),
             "max_lookback_days": max_lookback_days,
         }
     since = now - timedelta(hours=max(0.01, args.since_hours))
@@ -1293,7 +1299,7 @@ def main(argv: Sequence[str]) -> int:
     settings = load_settings(args.config)
     ensure_runtime_dirs(settings)
     now = datetime.now(TZ)
-    window = compute_window(args, now, settings.paths.sync_cursor_path)
+    window = compute_window(args, now, settings.paths.sync_cursor_path, overlap_hours=settings.collection.overlap_hours)
     since = window["since"]
     until = window["until"]
     chat_root = Path(args.chat_root) if args.chat_root else settings.paths.chat_root
@@ -1413,6 +1419,8 @@ def main(argv: Sequence[str]) -> int:
         "window_mode": window["window_mode"],
         "cursor_path": window["cursor_path"],
         "cursor_last_success_at": window["cursor_last_success_at"],
+        "effective_since": window.get("effective_since", since.isoformat()),
+        "overlap_hours": window.get("overlap_hours", 0),
         "max_lookback_days": window["max_lookback_days"],
         "assignee_user_id": assignee_user_id,
         "items": items,

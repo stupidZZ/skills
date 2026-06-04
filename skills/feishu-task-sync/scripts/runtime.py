@@ -71,6 +71,21 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True)
+class CollectionConfig:
+    """Collection-window behaviour.
+
+    ``overlap_hours`` intentionally re-scans a small window before the
+    last success cursor. Feishu messages can become visible through a
+    newly supported API path after the cursor has already advanced
+    (e.g. thread replies added in 0.3.10), and some message types are
+    delayed/edited after creation. Overlap + idempotent fingerprints is
+    safer than a strict no-overlap cursor.
+    """
+
+    overlap_hours: float = 6.0
+
+
+@dataclass(frozen=True)
 class UpdatesConfig:
     """Self-update settings for the skill installation.
 
@@ -121,6 +136,7 @@ class Settings:
     broadcast: BroadcastConfig
     paths: Paths
     retention: RetentionConfig
+    collection: CollectionConfig
     updates: UpdatesConfig
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -269,6 +285,19 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _validate_collection(raw: Dict[str, Any]) -> CollectionConfig:
+    if not isinstance(raw, dict):
+        raw = {}
+    try:
+        overlap = float(raw.get("overlap_hours") if raw.get("overlap_hours") is not None else 6.0)
+    except (TypeError, ValueError):
+        overlap = 6.0
+    # Hard bounds: 0 disables overlap, 24 is the maximum sane hourly
+    # overlap before collection cost starts to look like a daily job.
+    overlap = max(0.0, min(24.0, overlap))
+    return CollectionConfig(overlap_hours=overlap)
+
+
 def _validate_updates(raw: Dict[str, Any]) -> UpdatesConfig:
     if not isinstance(raw, dict):
         raw = {}
@@ -367,6 +396,7 @@ def load_settings(explicit_config: Optional[str] = None) -> Settings:
     feishu = _validate_feishu(raw.get("feishu") or {})
     broadcast = _validate_broadcast(raw.get("broadcast") or {})
     retention = _validate_retention(raw.get("retention") or {})
+    collection = _validate_collection(raw.get("collection") or {})
     paths = _resolve_paths(raw.get("paths") or {})
     updates = _validate_updates(raw.get("updates") or {})
 
@@ -378,6 +408,7 @@ def load_settings(explicit_config: Optional[str] = None) -> Settings:
         broadcast=broadcast,
         paths=paths,
         retention=retention,
+        collection=collection,
         updates=updates,
         raw=raw,
     )
@@ -439,6 +470,9 @@ def _print_settings(settings: Settings) -> None:
             "feishu_chat_cache_days": settings.retention.feishu_chat_cache_days,
             "state_success_days": settings.retention.state_success_days,
             "state_failed_days": settings.retention.state_failed_days,
+        },
+        "collection": {
+            "overlap_hours": settings.collection.overlap_hours,
         },
     }
     json.dump(masked, sys.stdout, ensure_ascii=False, indent=2)

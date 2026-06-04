@@ -3,6 +3,45 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.13 – sliding overlap window to prevent cursor-induced misses
+
+User observation after the thread-reply miss: the hourly window was too
+strictly tied to ``cursor.last_success_at``. The root issue was not the
+nominal window length, but the lack of overlap: when an older version
+successfully advanced the cursor while lacking a newly-added
+collection capability (e.g. thread replies before 0.3.10), messages in
+that blind spot were permanently outside the next window unless the
+user manually backfilled.
+
+Change:
+
+* New ``collection.overlap_hours`` config block (default ``6`` hours,
+  clamped to ``0..24``) in ``config.example.json`` and runtime
+  settings. Existing configs that do not contain the block pick up the
+  default automatically.
+* ``collect.compute_window(... --since-last-success ...)`` now uses:
+
+  ```python
+  since = max(last_success_at - overlap_hours, now - max_lookback_days)
+  ```
+
+  instead of starting exactly at ``last_success_at``. This turns the
+  cursor into a progress marker, not a hard exclusion boundary.
+* ``output/collected/latest.json`` now includes
+  ``effective_since`` and ``overlap_hours``, and ``window_mode``
+  becomes ``since-last-success-overlap`` when overlap is active.
+* ``prompts/heartbeat.md`` adds ``overlap_hours`` and
+  ``effective_since`` to the top information table so the user can see
+  why a window appears to start before the last success cursor.
+
+Why this is safe: creation is already idempotent via ``state.json``
+processed fingerprints and Feishu ``message_id`` dedupe. Re-scanning a
+small overlap is preferable to missing delayed/edited/thread-visible
+messages. Default overlap is 6h to cover the common cases without
+turning every hourly run into a full daily scan.
+
+Bumped SKILL.md to 0.3.13; top-level README skill row to 0.3.13.
+
 ## 0.3.12 – bound thread collection cost and parallelise chat scanning
 
 Follow-up to the 0.3.10 topic/thread support. A real hourly run on a
