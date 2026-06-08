@@ -1,10 +1,12 @@
 # 飞书同步 · 每小时心跳模板
 
-> 以下路径均以 `{{SKILL_DIR}}` 为根：bootstrap 阶段会把占位符替换为用户机器上的 Skill 安装路径。全部数据取自 `{{SKILL_DIR}}/output/collected/latest.json`、`{{SKILL_DIR}}/output/latest-report.json`、`{{SKILL_DIR}}/state/sync-cursor.json` 与 `{{SKILL_DIR}}/state/user-auth.json`；不要去读老版 main-agent 工作区路径。
+> 以下路径均以 `{{SKILL_DIR}}` 为根：bootstrap 阶段会把占位符替换为用户机器上的 Skill 安装路径。正常心跳数据优先取自 `{{SKILL_DIR}}/output/collected/latest-agent-input.json`、`{{SKILL_DIR}}/output/latest-report.json`、`{{SKILL_DIR}}/state/sync-cursor.json` 与 `{{SKILL_DIR}}/state/user-auth.json`；只有排查 collect/API 细节时才读取完整 `{{SKILL_DIR}}/output/collected/latest.json`。不要去读老版 main-agent 工作区路径。
 
-> 这是每小时同步任务结束后发给用户本人的运行心跳。所有数据**只能**取自本轮
-> `collect.py` 写入的 `output/collected/latest.json` 和 `feishu_tasks.py` 写入的
-> `output/latest-report.json`。不要使用 24h 累计来描述当前是否“缺 scope”。
+> 这是每小时同步任务结束后发给用户本人的运行心跳。常规字段优先取自本轮
+> `prepare_agent_batches.py` 写入的 `output/collected/latest-agent-input.json` 和
+> `feishu_tasks.py` 写入的 `output/latest-report.json`。不要把完整 `latest.json`
+> 交给模型生成心跳；它可能包含很大的 diagnostics/API response。不要使用 24h
+> 累计来描述当前是否“缺 scope”。
 
 > **交付路径**（0.3.6+）：生成下面这份卡片文本后，调
 > `python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config
@@ -43,24 +45,23 @@
 
 | 项 | 取值来源 |
 | --- | --- |
-| window since / until | `latest.json.window.since / window.until` |
-| window_mode | `latest.json.window_mode` |
-| overlap_hours | `latest.json.overlap_hours`（0.3.13+；默认 6，用于重叠回看防漏采）|
-| effective_since | `latest.json.effective_since`（实际回看的起点，通常早于 cursor.last_success_at）|
-| auth_mode_used | `latest.json.auth_checks.auth_mode_used` |
-| user_token_valid | `latest.json.auth_checks.user_auth.is_access_token_valid` |
-| refresh_token_valid | `latest.json.auth_checks.user_auth.is_refresh_token_valid` |
-| access_expires_at | `latest.json.auth_checks.user_auth.expires_at` |
+| window since / until | `latest-agent-input.json.window.since / window.until` |
+| window_mode | `latest-agent-input.json.window.window_mode` |
+| overlap_hours | `latest-agent-input.json.window.overlap_hours`（0.3.13+；默认 6，用于重叠回看防漏采）|
+| effective_since | `latest-agent-input.json.window.effective_since`（实际回看的起点，通常早于 cursor.last_success_at）|
+| auth_mode_used | `latest-agent-input.json.health.auth_mode_used` |
+| user_token_valid | `latest-agent-input.json.health.user_auth.is_access_token_valid` |
+| refresh_token_valid | `latest-agent-input.json.health.user_auth.is_refresh_token_valid` |
+| access_expires_at | `latest-agent-input.json.health.user_auth.expires_at` |
 | token_remaining | 由 `expires_at` 与心跳生成时间换算 |
-| refresh_expires_at | `latest.json.auth_checks.user_auth.refresh_expires_at`（飞书未返回则写 `None`） |
+| refresh_expires_at | `latest-agent-input.json.health.user_auth.refresh_expires_at`（飞书未返回则写 `None`） |
 | cursor.last_success_at | `latest-report.json.cursor.last_success_at` |
 | 上次成功间隔 | 当前时间 − last_success_at（分钟） |
-| feishu_chat_count | `latest.json.collection_options.feishu_chat_count` |
-| 本轮有消息会话数 | `latest.json.diagnostics[source=im.v1.messages.summary].chats_with_messages` |
-| 本轮普通消息总条数 | 同上 `.message_count` |
-| 话题候选数 | 同上 `.thread_candidates` / `.thread_scanned` |
-| 本轮话题回复条数 | 同上 `.thread_message_count`（0.3.10+；从 `container_id_type=thread` 二次拉取）|
-| 黑名单跳过会话数 | 同上 `.skipped_blacklisted`（`im-bad-chats.json` 列入的无效 chat，默认 0）|
+| 原始消息数 | `latest-agent-input.json.counts.raw_items` |
+| LLM 候选消息数 | `latest-agent-input.json.counts.candidate_items` |
+| batch_count | `latest-agent-input.json.batch_count` |
+| 本轮处理 batch | `latest-agent-input.json.next_batch.batch_id`（无候选写 `None`） |
+| 本轮 batch 字符估算 | `latest-agent-input.json.next_batch.estimated_chars` |
 | 候选 Todo | Agent 写入 `latest-todos.json.todos` 的条目数 |
 | 新建且可见的飞书任务 | `latest-report.json.created_count`（10.3.5+ 只计入 `created+visible` / `created-no-assignee`）|
 | 已创建但对指派人不可见 | `latest-report.json.created_but_invisible_count`（0.3.5+）|
@@ -83,12 +84,13 @@
 
 ```
 task_api ok=<true/false>
+task_write_api ok=<true/false>
 im_message_api ok=<true/false>
 doc_api ok=<true/false>
 本轮 missing_scopes：<逗号分隔，全部为空写"无">
 ```
 
-本轮没有发起调用的通道写 `本轮未发起调用`，**不要等同于缺 scope**。除非
+上述字段优先从 `latest-agent-input.json.health` 读取。本轮没有发起调用的通道写 `本轮未发起调用`，**不要等同于缺 scope**。除非
 `missing_scopes` 真的有值，禁止使用 “仍待补 scope / 持续 missing_scopes”
 等历史口径。
 

@@ -3,6 +3,47 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.14 – compact batched Agent input to reduce TPM pressure
+
+User report: after 0.3.13, hourly runs could still hit OpenAI TPM rate
+limits. Investigation showed the collector output was healthy, but the
+background Agent could read the entire ``output/collected/latest.json``:
+large ``diagnostics`` and ``auth_checks.response`` payloads were being
+sent to the model even though only compact candidate messages are needed
+for Todo extraction.
+
+Changes:
+
+* Added ``scripts/prepare_agent_batches.py``. It keeps the full
+  ``latest.json`` for debugging but derives a slim
+  ``output/collected/latest-agent-input.json`` manifest plus compact
+  ``output/collected/agent-batches/batch-*.json`` files for normal LLM
+  processing.
+* The manifest contains window metadata, compact health booleans,
+  missing scopes, counts, candidate/skip reason summaries and batch
+  paths. It deliberately excludes full diagnostics and API response
+  bodies.
+* Candidate messages are pre-filtered before the LLM step: explicit
+  assignee mentions, direct-chat/action signals and strong action
+  keywords are kept; obvious runtime heartbeat/build/deploy/sync noise
+  is skipped. The script records skip reason counts so the heartbeat can
+  explain why no LLM call was needed.
+* Batch files preserve traceable item fields only: source ids, text
+  truncated by default, timestamps, source refs, mentions and compact
+  thread context. Batches are split by both item count and character
+  budget, with thread-aware grouping where possible.
+* Added lightweight ``state/agent-batch-state.json`` support via
+  ``prepare_agent_batches.py --mark-batch-complete``. Hourly runs process
+  one batch at a time; if more batches remain they create tasks without
+  advancing the collection cursor, mark the batch complete after a
+  successful create, and let the next run continue.
+* Updated ``prompts/agent-hourly.md`` so normal operation runs the
+  prepare step, reads ``latest-agent-input.json`` first, skips the LLM
+  entirely when ``batch_count == 0``, and only opens full ``latest.json``
+  for debugging.
+
+Bumped SKILL.md and the repository skill index to 0.3.14.
+
 ## 0.3.13 – sliding overlap window to prevent cursor-induced misses
 
 User observation after the thread-reply miss: the hourly window was too
