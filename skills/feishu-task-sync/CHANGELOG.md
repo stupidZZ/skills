@@ -3,6 +3,53 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.15 – hard gate Todo creation on assignee evidence
+
+User report: the skill created a Feishu task assigned to the user for
+this message:
+
+> 今天涨涨在数据需求的群里找计川一块分析下… cc@Zake
+
+That is a real action item, but it is **not assigned to ZZ**: the
+actor is 涨涨, collaborator is 计川, and cc is Zake. Because all tasks
+created by the skill are assigned to ``default_assignee_open_id``, a
+semantic extraction error becomes a wrong task on the user's list.
+
+Fixes:
+
+* ``feishu_tasks.py create`` now enforces a hard assignee-evidence gate
+  before calling the Feishu create API. Allowed evidence:
+  ``metadata_mentions_assignee``, ``explicit_zz_action``,
+  ``explicit_you_action``, ``explicit_assignee_action``. Blocked
+  evidence includes ``cc_only``, ``third_party_assignee``,
+  ``no_assignee``, ``ambiguous_assignee``, ``weak_context`` and
+  missing values.
+* Backward-compatible escape hatch: if a hand-authored todo
+  description explicitly embeds metadata proof (the assignee open_id
+  plus ``mentioned_assignee=true`` or ``metadata.mentions``), creation
+  is allowed even if the enum is missing. This keeps repair jobs
+  possible while blocking vague LLM guesses.
+* Blocked items are recorded as ``status=skipped-wrong-assignee`` in
+  ``state/state.json`` and counted as ``skipped_wrong_assignee_count``
+  in ``latest-report.json``. They are added to ``SKIP_STATUSES`` so the
+  same non-assigned action does not get retried every overlap window.
+* ``prompts/agent-hourly.md`` now requires every Todo to include the
+  fixed ``assignee_evidence`` enum and explains the distinction:
+  “找某人 / 让某人 / 和某人一起” is not inherently forbidden; it is
+  only valid when the message clearly asks **ZZ** to initiate / drive /
+  follow up. ``@ZZ 找计川分析`` is valid; ``涨涨找计川分析 cc@Zake`` is not.
+* ``prompts/heartbeat.md`` documents ``skipped_wrong_assignee_count``
+  and asks the heartbeat to list up to five skipped action items with
+  evidence/reason so users can see the system intentionally skipped
+  them rather than missing them.
+
+Verified locally with a synthetic todo matching the reported case
+(``assignee_evidence=third_party_assignee``): ``feishu_tasks.py create``
+returns ``created_count=0``, ``skipped_count=1`` and
+``skipped_wrong_assignee_count=1`` without calling Feishu task create.
+
+Bumped SKILL.md to 0.3.15; top-level README skill row to 0.3.15.
+
 ## 0.3.14 – compact batched Agent input to reduce TPM pressure
 
 User report: after 0.3.13, hourly runs could still hit OpenAI TPM rate

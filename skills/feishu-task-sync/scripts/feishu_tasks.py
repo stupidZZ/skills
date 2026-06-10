@@ -169,6 +169,56 @@ def todo_grounding_entities(todo: Dict[str, Any]) -> List[str]:
     return extract_grounding_entities("\n".join(texts))
 
 
+ALLOWED_ASSIGNEE_EVIDENCE = {
+    "metadata_mentions_assignee",
+    "explicit_zz_action",
+    "explicit_you_action",
+    "explicit_assignee_action",
+}
+
+BLOCKED_ASSIGNEE_EVIDENCE = {
+    "cc_only",
+    "third_party_assignee",
+    "no_assignee",
+    "ambiguous_assignee",
+    "ambiguous_placeholder_skip",
+    "weak_context",
+    "none",
+    "",
+}
+
+
+def normalise_assignee_evidence(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def validate_assignee_evidence(todo: Dict[str, Any], assignee_user_id: Optional[str]) -> Optional[str]:
+    """Reject Todos that are not clearly assigned to the configured user.
+
+    The LLM prompt must decide whether a message is for the user, but the
+    create path is the last safety gate before a wrong Feishu task appears in
+    the user's list. Accept only explicit evidence that the user is the
+    assignee/coordinator. Third-party tasks and cc-only mentions are skipped.
+    """
+
+    evidence = normalise_assignee_evidence(todo.get("assignee_evidence"))
+    if evidence in ALLOWED_ASSIGNEE_EVIDENCE:
+        return None
+    # Backward-compatible recovery for a well-grounded description that
+    # explicitly embeds the metadata proof. This lets hand-authored repair
+    # jobs through while still rejecting vague LLM guesses.
+    description = str(todo.get("description") or "")
+    if assignee_user_id and assignee_user_id in description and (
+        "mentioned_assignee=true" in description
+        or "metadata.mentions" in description
+        or "metadata_mentions_assignee" in description
+    ):
+        return None
+    if evidence in BLOCKED_ASSIGNEE_EVIDENCE:
+        return f"wrong-assignee-evidence:{evidence or 'missing'}"
+    return f"wrong-assignee-evidence:{evidence}"
+
+
 def validate_todo_grounding(todo: Dict[str, Any]) -> Optional[str]:
     """Reject pronoun-only Todo titles before they reach Feishu Tasks.
 
@@ -442,7 +492,28 @@ def command_create(args: argparse.Namespace) -> int:
                 "due_at": todo.get("due_at"),
                 "source_refs": todo.get("source_refs") or [],
                 "confidence": todo.get("confidence"),
+                "assignee_evidence": todo.get("assignee_evidence"),
                 "error": grounding_error,
+                "updated_at": now.isoformat(),
+            }
+            continue
+        assignee_error = validate_assignee_evidence(todo, assignee_user_id)
+        if assignee_error:
+            skipped.append({
+                "fingerprint": fingerprint,
+                "title": title,
+                "reason": assignee_error,
+                "assignee_evidence": todo.get("assignee_evidence"),
+            })
+            processed[fingerprint] = {
+                "status": "skipped-wrong-assignee",
+                "title": title,
+                "description": build_task_description(todo),
+                "due_at": todo.get("due_at"),
+                "source_refs": todo.get("source_refs") or [],
+                "confidence": todo.get("confidence"),
+                "assignee_evidence": todo.get("assignee_evidence"),
+                "error": assignee_error,
                 "updated_at": now.isoformat(),
             }
             continue
@@ -550,6 +621,7 @@ def command_create(args: argparse.Namespace) -> int:
             "due_at": todo.get("due_at"),
             "source_refs": todo.get("source_refs") or [],
             "confidence": todo.get("confidence"),
+            "assignee_evidence": todo.get("assignee_evidence"),
             "feishu_task_guid": result.feishu_task_guid,
             "feishu_task_id": result.feishu_task_id,
             "error": result.error,
@@ -573,6 +645,7 @@ def command_create(args: argparse.Namespace) -> int:
         1 for item in results if item.status == "created-visibility-unknown"
     )
     explicit_failed_count = sum(1 for item in results if item.status == "failed")
+    skipped_wrong_assignee_count = sum(1 for item in skipped if str(item.get("reason") or "").startswith("wrong-assignee-evidence:"))
     # Treat invisible as a failure so the cursor + cron retry next tick;
     # "unknown" is a soft warning (verification GET itself crashed) and
     # does not block the cursor.
@@ -595,6 +668,7 @@ def command_create(args: argparse.Namespace) -> int:
         "created_but_invisible_count": invisible_count,
         "visibility_unknown_count": visibility_unknown_count,
         "skipped_count": len(skipped),
+        "skipped_wrong_assignee_count": skipped_wrong_assignee_count,
         "failed_count": failed_count,
         "removed_by_gc": removed_by_gc,
         "source_generated_at": payload.get("generated_at"),
@@ -617,6 +691,7 @@ def command_create(args: argparse.Namespace) -> int:
             f"feishu_tasks create input={input_path} todos={len(todos)} "
             f"created={created_count} invisible={invisible_count} "
             f"unknown={visibility_unknown_count} skipped={len(skipped)} "
+            f"wrong_assignee={skipped_wrong_assignee_count} "
             f"failed={explicit_failed_count} cursor_status={cursor_status} "
             f"cursor_marked={bool(args.mark_success_cursor)}"
         ),

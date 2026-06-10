@@ -13,7 +13,7 @@ conventions and tooling can be reused.
 
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
-| [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.14 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
+| [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.15 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
 
 ## Layout
 

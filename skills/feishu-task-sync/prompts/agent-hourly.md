@@ -75,7 +75,7 @@ python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/co
         }
       ],
       "confidence": 0.0,
-      "assignee_evidence": "metadata_mentions_assignee / explicit_name / strong_context / ambiguous_placeholder_skip",
+      "assignee_evidence": "metadata_mentions_assignee / explicit_zz_action / explicit_you_action / explicit_assignee_action / cc_only / third_party_assignee / no_assignee / ambiguous_assignee",
       "fingerprint": null
     }
   ]
@@ -84,8 +84,12 @@ python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/co
 
 过滤规则：
 
-- 只保留明确要求我行动、跟进、确认、交付、回复、整理、修复、安排的事项。
+- 只保留明确要求**我本人**行动、跟进、确认、交付、回复、整理、修复、安排的事项。先判断“是否指派给我”，再解析我要做什么。
+- `assignee_evidence` 必须写入固定枚举：
+  - 允许创建：`metadata_mentions_assignee`（metadata 明确 @到我的 open_id）、`explicit_zz_action`（文本明确说 ZZ 要做）、`explicit_you_action`（文本明确“你”要做且上下文指向我）、`explicit_assignee_action`（明确称呼/上下文把行动指给我）。
+  - 禁止创建：`cc_only`（只是 cc/知会我）、`third_party_assignee`（明确是别人执行，例如“涨涨找计川分析”）、`no_assignee`、`ambiguous_assignee`。
 - 对飞书消息中的 `@_user_1` / `@_user_N` 这类接口脱敏占位符，不要自动推断为“@我”；只有在 `metadata.mentions[].user_id == 我的 open_id` 或 `metadata.mentioned_assignee == true` 时才视为 @我。文本里的 `@_user_N` / `@某中文名` 不算证据。若证据不足，只写入日志/摘要，不创建任务。
+- “找某人 / 让某人 / 和某人一起”不是禁止条件；关键是这件事是不是让我来发起/推动/跟进。例如 `@ZZ 找计川一起分析` 应创建，`今天涨涨找计川分析，cc@Zake` 不应创建给我。
 - **标题必须可脱离上下文理解。** 如果原文只说“这个/新的方案”“这个问题”“这个事情”“这个 case”“这个链接”“看一下这个”等指代词，必须先从同一 item 的 `metadata.thread_context.root_text`、根消息文件名、链接文本/URL、case/thread ID、文档标题或最近上下文中提取具体对象，并写进 `title`。例如不要写“和鼎鼎一起看新的方案”，应写“看 test-center-v2-design.html 新方案，并和鼎鼎/方荣反馈意见”。
 - 若无法为上述指代词找到具体对象：不要创建 Todo；只在心跳/摘要的过滤详情里说明“缺少可理解对象，已跳过”。不要用模糊标题硬建任务。
 - `description` 必须保留指代消解依据：包括触发消息原文，以及用于补全对象的根消息/附件名/链接/case id。若 `metadata.thread_context` 存在，要优先引用其 `root_text` / `root_message_id`。

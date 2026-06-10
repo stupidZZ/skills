@@ -106,6 +106,7 @@ SKIP_STATUSES = {
     "created+assigned",
     "created+visible",
     "created-no-assignee",
+    "skipped-wrong-assignee",
 }
 TASK_SCOPE_HINTS = ["task:task:read", "task:task:write"]
 FEISHU_DOC_SCOPE_HINTS = [
