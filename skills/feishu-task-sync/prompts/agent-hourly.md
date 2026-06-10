@@ -153,20 +153,23 @@ python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/co
 
 只有 collect、prepare、Agent 写 Todo JSON、create，以及必要时 mark-batch-complete 全链路成功，才算本轮成功。若 Agent 无法写出合法 Todo JSON，不要调用 `create`，也不要推进游标。
 
-5. 心跳卡片：使用 `{{SKILL_DIR}}/prompts/heartbeat.md` 的模板生成心跳文本，以底下“交付渠道”一节描述的方式发送。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
+5. 心跳卡片：**不要再由 Agent 自己拼心跳文本**。直接调用确定性脚本生成并发送，避免模型生成心跳 + shell here-doc 组合触发 120s 工具超时：
+
+```bash
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-heartbeat
+```
+
+该命令会读取 `latest-agent-input.json` / `latest-report.json` / `latest.json` 的摘要字段，生成小时心跳并通过 smartZZ 机器人私聊发给用户本人。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
 
 ## 交付渠道（0.3.6+）
 
 Kian 在 0.3.6 之后默认不再使用“广播群机器人 webhook”发心跳。交付路径是让机器人应用（`cli_a956…`）以 `im:message:send_as_bot` 身份私聊发给用户本人：
 
 ```bash
-# 文本可以从 stdin 传入（推荐，避免 shell 引号转义问题）
-cat <<\HEARTBEAT | python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-message
-<这里按 heartbeat.md 拼出的中文心跳卡片文本>
-HEARTBEAT
+python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-heartbeat
 ```
 
-你也可以用 `--text "..."` 传入。但对任何多行中文文本，**强烈推荐 stdin**：heartbeat 文本里带着 `\n` / 反引号 / emoji 都能一次传完。
+如确实需要发送自定义文本，可调用 `send-message`；但正常每小时心跳必须使用 `send-heartbeat`。
 
 默认接收方是 `settings.feishu.default_assignee_open_id`（安装时填的那个 open_id，即用户本人）。需要发给别人时加 `--to ou_xxx`。
 

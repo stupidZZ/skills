@@ -3,6 +3,46 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.16 – deterministic hourly heartbeat sender
+
+User report: after the hourly pipeline had already collected data,
+created/advanced the cursor, and sent a heartbeat, Kian still showed
+``处理失败：Command timed out after 120 seconds``. Investigation showed
+that the business pipeline succeeded; the timeout came from the
+background Agent's final tool/here-doc step while it was constructing
+and sending a long heartbeat message itself. This made a successful
+run look like a failed run.
+
+Changes:
+
+* New ``bootstrap.py send-heartbeat`` subcommand. It deterministically
+  reads ``output/collected/latest-agent-input.json``,
+  ``output/latest-report.json`` and compact diagnostics from
+  ``output/collected/latest.json``, builds the standard hourly
+  heartbeat text in Python, and immediately sends it through the
+  existing ``send-message`` path. No LLM-generated heartbeat text, no
+  shell here-doc, no ad-hoc Python snippet in the prompt.
+* ``prompts/agent-hourly.md`` now instructs the background Agent to
+  call exactly:
+
+  ```bash
+  python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-heartbeat
+  ```
+
+  after the create/mark-batch step. Normal hourly heartbeats must not
+  be assembled by the Agent anymore. ``send-message`` remains available
+  only for custom/free-form messages.
+* The generated heartbeat includes the same core operational fields:
+  window/effective_since/overlap, auth state, cursor state, raw and
+  candidate counts, task create counts, missing scopes, thread scan
+  summary, and wrong-assignee skipped count when present.
+
+This does not change collect/create semantics. It only removes a
+fragile model/tool-generated tail step that could time out after the
+real work had already succeeded.
+
+Bumped SKILL.md to 0.3.16; top-level README skill row to 0.3.16.
+
 ## 0.3.15 – hard gate Todo creation on assignee evidence
 
 User report: the skill created a Feishu task assigned to the user for

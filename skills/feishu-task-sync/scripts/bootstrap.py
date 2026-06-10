@@ -2828,6 +2828,109 @@ def _command_preflight(args: argparse.Namespace) -> int:
     return 0 if overall_ok else 1
 
 
+def _read_json_file(path: Path, default: Any = None) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _build_hourly_heartbeat_text(settings: Any) -> str:
+    """Deterministically build the hourly heartbeat text.
+
+    This avoids asking the background Agent to synthesize a long
+    heartbeat from JSON every hour, which previously pushed Kian's
+    tool/turn timeout boundary. The text intentionally mirrors the
+    heartbeat prompt's core table but only uses compact summary files.
+    """
+
+    paths = settings.paths
+    manifest = _read_json_file(paths.collected_dir / "latest-agent-input.json", {}) or {}
+    report = _read_json_file(paths.report_json_path, {}) or {}
+    latest = _read_json_file(paths.collected_dir / "latest.json", {}) or {}
+    window = manifest.get("window") or {}
+    counts = manifest.get("counts") or {}
+    health = manifest.get("health") or {}
+    cursor = report.get("cursor") or {}
+    user_auth = health.get("user_auth") or {}
+
+    now = datetime.now().astimezone()
+    expires_at = _parse_iso_dt(user_auth.get("expires_at"))
+    remaining = None
+    if expires_at:
+        remaining = int((expires_at.astimezone(now.tzinfo) - now).total_seconds() // 60)
+    last_success = _parse_iso_dt(cursor.get("last_success_at"))
+    success_gap = None
+    if last_success:
+        success_gap = int((now - last_success.astimezone(now.tzinfo)).total_seconds() // 60)
+
+    im_summary = {}
+    for diag in latest.get("diagnostics") or []:
+        if isinstance(diag, dict) and diag.get("source") == "im.v1.messages.summary":
+            im_summary = diag
+            break
+
+    lines: List[str] = []
+    lines.append(f"飞书任务同步 · 每小时心跳 {now.strftime('%Y-%m-%d %H:%M')} ✅")
+    lines.append("")
+    lines.append(f"- window: {window.get('since')} → {window.get('until')}")
+    lines.append(f"- window_mode: {window.get('window_mode')}; overlap_hours: {window.get('overlap_hours')}; effective_since: {window.get('effective_since')}")
+    lines.append(f"- auth_mode_used: {health.get('auth_mode_used')}; user_token_valid: {user_auth.get('is_access_token_valid')}; refresh_token_valid: {user_auth.get('is_refresh_token_valid')}")
+    lines.append(f"- access_expires_at: {user_auth.get('expires_at')}; token_remaining: {remaining if remaining is not None else 'unknown'} 分钟; refresh_expires_at: {user_auth.get('refresh_expires_at')}")
+    lines.append(f"- cursor.last_success_at: {cursor.get('last_success_at')}; 上次成功间隔: {success_gap if success_gap is not None else 'unknown'} 分钟; 游标推进: {cursor.get('last_status')}")
+    lines.append(f"- 原始消息数: {counts.get('raw_items')}; LLM 候选消息数: {counts.get('candidate_items')}; batch_count: {manifest.get('batch_count')}; 本轮处理 batch: {(manifest.get('next_batch') or {}).get('batch_id') if manifest.get('next_batch') else 'None'}")
+    lines.append(f"- 候选 Todo: {report.get('todo_count', 0)}; 新建且可见: {report.get('created_count', 0)}; 不可见: {report.get('created_but_invisible_count', 0) or 0}; 未知: {report.get('visibility_unknown_count', 0) or 0}; 跳过/去重: {report.get('skipped_count', 0)}; 跳过非指派: {report.get('skipped_wrong_assignee_count', 0) or 0}; 失败: {report.get('failed_count', 0)}")
+    lines.append("")
+    lines.append(f"本轮结论：扫描到 {counts.get('raw_items', 0)} 条消息 / {counts.get('candidate_items', 0)} 条候选；本轮新建 {report.get('created_count', 0)} 条任务。")
+    lines.append("")
+    lines.append("接口与权限健康度：")
+    lines.append(f"- task_api ok={health.get('task_api_ok')}")
+    lines.append(f"- task_write_api ok={health.get('task_write_api_ok')}")
+    lines.append(f"- im_message_api ok={health.get('im_message_api_ok')}")
+    lines.append(f"- doc_api ok={health.get('doc_api_ok')}")
+    missing = health.get("missing_scopes") or []
+    lines.append("- 本轮 missing_scopes：" + (", ".join(missing) if missing else "无"))
+    lines.append("")
+    if im_summary:
+        lines.append(
+            "话题采集："
+            f"full_discovery={im_summary.get('thread_full_discovery_ran')}; "
+            f"thread_scanned={im_summary.get('thread_scanned')}; "
+            f"thread_message_count={im_summary.get('thread_message_count')}; "
+            f"thread_failed={im_summary.get('thread_failed')}"
+        )
+        if im_summary.get("failed_chats"):
+            lines.append(f"普通消息采集：success_chats={im_summary.get('success_chats')}, failed_chats={im_summary.get('failed_chats')}（部分无效/无权限 chat 已记录 diagnostics）")
+    skipped_wrong = [s for s in (report.get("skipped") or []) if str(s.get("reason") or "").startswith("wrong-assignee-evidence:")]
+    if skipped_wrong:
+        lines.append("")
+        lines.append(f"识别到 {len(skipped_wrong)} 条行动项但不是指派给我，已跳过：")
+        for item in skipped_wrong[:5]:
+            lines.append(f"- {item.get('title')} ({item.get('reason')})")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _command_send_heartbeat(args: argparse.Namespace) -> int:
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        print(f"[bootstrap] {exc}", file=sys.stderr)
+        return 2
+    ensure_runtime_dirs(settings)
+    text = _build_hourly_heartbeat_text(settings)
+    send_args = argparse.Namespace(config=args.config, print_json=args.print_json, text=text, to=args.to)
+    return _command_send_message(send_args)
+
+
 def _command_send_message(args: argparse.Namespace) -> int:
     """Send a plain-text DM to a Feishu user via the bot identity.
 
@@ -3022,6 +3125,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p_send.add_argument("--text", required=False, default=None, help="Message body. If omitted, read from stdin.")
     p_send.add_argument("--to", default=None, help="Recipient open_id. Defaults to settings.feishu.default_assignee_open_id.")
 
+    p_hb = sub.add_parser(
+        "send-heartbeat",
+        help="Build and send the hourly heartbeat deterministically from latest-agent-input.json + latest-report.json.",
+    )
+    p_hb.add_argument("--to", default=None, help="Recipient open_id. Defaults to settings.feishu.default_assignee_open_id.")
+
     p_update = sub.add_parser(
         "update",
         help="Check or apply skill upgrades from the upstream repository. Wraps scripts/updater.py.",
@@ -3072,6 +3181,8 @@ def main(argv: Sequence[str]) -> int:
         return _command_preflight(args)
     if args.command == "send-message":
         return _command_send_message(args)
+    if args.command == "send-heartbeat":
+        return _command_send_heartbeat(args)
     if args.command == "update":
         forwarded: List[str] = []
         if args.config:
