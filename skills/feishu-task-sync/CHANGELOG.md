@@ -3,6 +3,43 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.17 – force cron prompt to split long commands with explicit timeouts
+
+User report after 0.3.16: the hourly run still showed
+``处理失败：Command timed out after 120 seconds``. Logs showed the
+background Agent combined ``collect.py`` and ``prepare_agent_batches.py``
+into a single Bash tool call with ``timeout=120``:
+
+```bash
+set -e
+python3 .../collect.py --since-last-success
+python3 .../prepare_agent_batches.py
+```
+
+This reintroduced the timeout class even though 0.3.16 had removed the
+fragile heartbeat here-doc. On tenants with hundreds of chats,
+``collect.py`` alone legitimately needs close to or above 120s.
+
+Fix:
+
+* ``prompts/agent-hourly.md`` now has an explicit **执行约束** section:
+  - never combine long commands into one Bash tool call;
+  - run ``collect.py`` in its own Bash call with ``timeout=300``;
+  - run ``prepare_agent_batches.py`` in its own Bash call with
+    ``timeout=180``;
+  - run ``feishu_tasks.py create`` in its own Bash call with
+    ``timeout=180``;
+  - run ``send-heartbeat`` in its own Bash call with ``timeout=120``.
+* The create and heartbeat sections repeat the per-command timeout so
+  even if the agent skims the prompt it sees the constraint near the
+  command it is about to run.
+
+No Python logic changes. This is a cron-agent instruction hardening
+release. ``post-update`` will refresh ``cronjob.json`` content so the
+new prompt reaches the background Agent.
+
+Bumped SKILL.md to 0.3.17; top-level README skill row to 0.3.17.
+
 ## 0.3.16 – deterministic hourly heartbeat sender
 
 User report: after the hourly pipeline had already collected data,
