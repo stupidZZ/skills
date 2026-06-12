@@ -3,6 +3,29 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.18 – increase cron command timeout budgets
+
+Follow-up to 0.3.17. Splitting long commands into separate Bash calls
+fixed the worst failure mode, but the per-command budgets were still
+conservative for tenants with hundreds of chats and occasional slow
+Feishu API responses. The default Kian Bash timeout is 120s; the skill
+must be explicit and generous for background sync jobs.
+
+Prompt-only change in ``prompts/agent-hourly.md``:
+
+| Stage | 0.3.17 | 0.3.18 |
+|---|---:|---:|
+| ``collect.py`` | 300s | 600s |
+| ``prepare_agent_batches.py`` | 180s | 300s |
+| ``feishu_tasks.py create`` | 180s | 300s |
+| ``send-heartbeat`` | 120s | 180s |
+
+The commands still must be run as **separate** Bash tool calls; this
+release only widens each call's allowed runtime. ``post-update`` will
+refresh ``cronjob.json`` so the background Agent sees the new budgets.
+
+Bumped SKILL.md to 0.3.18; top-level README skill row to 0.3.18.
+
 ## 0.3.17 – force cron prompt to split long commands with explicit timeouts
 
 User report after 0.3.16: the hourly run still showed

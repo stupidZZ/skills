@@ -16,21 +16,21 @@
 ## 执行约束（非常重要）
 
 - **不要**把多个长命令合并成一个 Bash 工具调用。
-- `collect.py` 必须单独调用一次 Bash，并显式设置工具 `timeout=300`。
-- `prepare_agent_batches.py` 必须单独调用一次 Bash，并显式设置工具 `timeout=180`。
-- `feishu_tasks.py create` 必须单独调用一次 Bash，并显式设置工具 `timeout=180`。
-- `send-heartbeat` 必须单独调用一次 Bash，并显式设置工具 `timeout=120`。
+- `collect.py` 必须单独调用一次 Bash，并显式设置工具 `timeout=600`。
+- `prepare_agent_batches.py` 必须单独调用一次 Bash，并显式设置工具 `timeout=300`。
+- `feishu_tasks.py create` 必须单独调用一次 Bash，并显式设置工具 `timeout=300`。
+- `send-heartbeat` 必须单独调用一次 Bash，并显式设置工具 `timeout=180`。
 - 如果你把 `collect.py && prepare_agent_batches.py` 合并到一个默认 120s 的 Bash，Kian 会在 120 秒杀掉命令，即使业务链路本来能成功；这是已知事故，严禁合并。
 
 每小时执行：
 
-1. 运行采集（单独 Bash，timeout=300）：
+1. 运行采集（单独 Bash，timeout=600）：
 
 ```bash
 python3 {{SKILL_DIR}}/scripts/collect.py --config {{SKILL_DIR}}/config.json --since-last-success
 ```
 
-2. 生成瘦身 Agent 输入与批次（单独 Bash，timeout=180）：
+2. 生成瘦身 Agent 输入与批次（单独 Bash，timeout=300）：
 
 ```bash
 python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/config.json
@@ -126,7 +126,7 @@ python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/co
 }
 ```
 
-然后推进游标（单独 Bash，timeout=180）：
+然后推进游标（单独 Bash，timeout=300）：
 
 ```bash
 python3 {{SKILL_DIR}}/scripts/feishu_tasks.py --config {{SKILL_DIR}}/config.json create \
@@ -168,7 +168,7 @@ python3 {{SKILL_DIR}}/scripts/prepare_agent_batches.py --config {{SKILL_DIR}}/co
 python3 {{SKILL_DIR}}/scripts/bootstrap.py --print-json --config {{SKILL_DIR}}/config.json send-heartbeat
 ```
 
-该命令必须作为**单独 Bash，timeout=120** 执行。它会读取 `latest-agent-input.json` / `latest-report.json` / `latest.json` 的摘要字段，生成小时心跳并通过 smartZZ 机器人私聊发给用户本人。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
+该命令必须作为**单独 Bash，timeout=180** 执行。它会读取 `latest-agent-input.json` / `latest-report.json` / `latest.json` 的摘要字段，生成小时心跳并通过 smartZZ 机器人私聊发给用户本人。心跳每小时都发，无论是否创建了任务，用于让用户观测后台状态。
 
 ## 交付渠道（0.3.6+）
 
