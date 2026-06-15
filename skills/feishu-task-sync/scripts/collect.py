@@ -6,6 +6,7 @@ import json
 import math
 import re
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -135,7 +136,12 @@ THREAD_DISCOVERY_LOOKBACK_HOURS = 48
 # operation should rely on remembered thread ids + roots seen in the
 # current chat window.
 THREAD_DISCOVERY_CHAT_LIMIT = 120
-IM_FETCH_WORKERS = 24
+# Keep below Feishu's burst limits. 24 was fast but caused many
+# code=99991400 "request trigger frequency limit" failures on tenants
+# with ~400 chats. 8 plus retry is slower but reliable.
+IM_FETCH_WORKERS = 8
+IM_RATE_LIMIT_CODE = 99991400
+IM_RATE_LIMIT_RETRIES = 3
 
 
 def _im_bad_chats_path(state_dir: Path) -> Path:
@@ -655,13 +661,22 @@ def _fetch_chat_messages_for_collect(
     items: List[Dict[str, Any]] = []
     raw_messages: List[Dict[str, Any]] = []
     while True:
-        data = client.list_im_messages(
-            chat_id=chat_id,
-            start_time=int(since.timestamp()),
-            end_time=int(until.timestamp()),
-            page_size=50,
-            page_token=page_token,
-        )
+        for attempt in range(IM_RATE_LIMIT_RETRIES + 1):
+            try:
+                data = client.list_im_messages(
+                    chat_id=chat_id,
+                    start_time=int(since.timestamp()),
+                    end_time=int(until.timestamp()),
+                    page_size=50,
+                    page_token=page_token,
+                )
+                break
+            except FeishuApiError as exc:
+                code = exc.payload.get("code") if isinstance(exc.payload, dict) else None
+                if code == IM_RATE_LIMIT_CODE and attempt < IM_RATE_LIMIT_RETRIES:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
         payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
         raw_items = _extract_items_from_api_payload(data)
         chat_record["pages"].append(data)
@@ -900,13 +915,22 @@ def collect_feishu_cloud_chat_items(
             page_count = 0
             while True:
                 page_count += 1
-                data = client.list_im_messages_by_container(
-                    container_id_type="thread",
-                    container_id=thread_id,
-                    page_size=50,
-                    page_token=page_token,
-                    sort_type="ByCreateTimeDesc",
-                )
+                for attempt in range(IM_RATE_LIMIT_RETRIES + 1):
+                    try:
+                        data = client.list_im_messages_by_container(
+                            container_id_type="thread",
+                            container_id=thread_id,
+                            page_size=50,
+                            page_token=page_token,
+                            sort_type="ByCreateTimeDesc",
+                        )
+                        break
+                    except FeishuApiError as exc:
+                        code = exc.payload.get("code") if isinstance(exc.payload, dict) else None
+                        if code == IM_RATE_LIMIT_CODE and attempt < IM_RATE_LIMIT_RETRIES:
+                            time.sleep(1.5 * (attempt + 1))
+                            continue
+                        raise
                 payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
                 raw_items = _extract_items_from_api_payload(data)
                 thread_record["pages"].append(data)
@@ -973,6 +997,8 @@ def collect_feishu_cloud_chat_items(
             "failed_chats": summary_failed_chats,
             "chats_with_messages": summary_chats_with_messages,
             "message_count": summary_message_count,
+            "im_fetch_workers": IM_FETCH_WORKERS,
+            "im_rate_limit_retries": IM_RATE_LIMIT_RETRIES,
             "thread_discovery_lookback_hours": THREAD_DISCOVERY_LOOKBACK_HOURS,
             "thread_full_discovery_ran": should_run_full_discovery,
             "thread_scan_page_limit": THREAD_SCAN_PAGE_LIMIT,

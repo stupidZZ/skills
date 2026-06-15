@@ -3,6 +3,33 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.19 – reduce IM fetch concurrency and retry Feishu rate limits
+
+User observed a heartbeat with ``failed_chats=128``. Investigation of
+``latest.json`` diagnostics showed every failed chat had Feishu error
+``code=99991400`` / ``msg=request trigger frequency limit``. This was
+not a permissions problem and not invalid chat IDs; it was a side effect
+of the 0.3.12 performance optimisation, where ``IM_FETCH_WORKERS=24``
+made hundreds of chat history requests too bursty for Feishu's runtime
+limit.
+
+Fix:
+
+- Reduce ``IM_FETCH_WORKERS`` from 24 to 8. This trades some latency for
+  reliability and still keeps collection parallel.
+- Add bounded retry/backoff for ``code=99991400`` in both normal chat
+  fetches and thread-container fetches: 3 retries with increasing
+  sleeps before surfacing an error.
+- ``im.v1.messages.summary`` now reports ``im_fetch_workers`` and
+  ``im_rate_limit_retries`` so future heartbeats show which tuning was
+  active.
+
+This release complements 0.3.18's larger timeout budget: slower but
+rate-limit-safe API usage is preferable to fast bursts that create
+hundreds of failed chats.
+
+Bumped SKILL.md to 0.3.19; top-level README skill row to 0.3.19.
+
 ## 0.3.18 – increase cron command timeout budgets
 
 Follow-up to 0.3.17. Splitting long commands into separate Bash calls
