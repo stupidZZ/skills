@@ -14,12 +14,14 @@ conventions and tooling can be reused.
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
 | [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.19 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
+| [`research-report-methodology`](skills/research-report-methodology/) | 0.1.0 | 研究/实验报告方法论：自包含 setting、公平对比、baseline pairing、指标定义和结论边界。 | [Agent spec](skills/research-report-methodology/SKILL.md) |
 
 ## Layout
 
 ```
 skills/
   feishu-task-sync/      # Sync Feishu chats / docs / wiki into Feishu Tasks
+  research-report-methodology/
 template/                # Minimal SKILL.md template used as a starting point
 ```
 
