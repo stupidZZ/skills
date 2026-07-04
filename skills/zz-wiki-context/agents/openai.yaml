@@ -1,0 +1,4 @@
+interface:
+  display_name: "ZZ Wiki Context"
+  short_description: "Load task-relevant zz-wiki context"
+  default_prompt: "Use $zz-wiki-context to load the relevant zz-wiki context for this task."

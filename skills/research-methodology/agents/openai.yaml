@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Methodology"
+  short_description: "Plan, analyze, and report empirical research"
+  default_prompt: "Use $research-methodology to plan, analyze, and report this research task."
