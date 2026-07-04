@@ -3,6 +3,18 @@
 Use this reference when writing, reviewing, or revising a research report,
 experiment report, benchmark report, ablation report, or empirical analysis.
 
+## Contents
+
+- [Core Standard](#core-standard)
+- [Scale The Artifact](#scale-the-artifact)
+- [Recommended Structure](#recommended-structure)
+- [Section Template](#section-template)
+- [Baseline Pairing](#baseline-pairing)
+- [New Experiments Belong On Existing Axes](#new-experiments-belong-on-existing-axes)
+- [Metric Discipline](#metric-discipline)
+- [Conclusion Pattern](#conclusion-pattern)
+- [Report Anti-patterns](#report-anti-patterns)
+
 ## Core Standard
 
 Every experiment section must be self-contained. A reader should understand
@@ -15,12 +27,23 @@ Each section should answer:
 1. What question does this experiment answer?
 2. What is the task, dataset, target distribution, or evaluation target?
 3. Which variables change, and which controls stay fixed?
-4. What method, model/backbone, conditioning, parameter count, dataset, and
-   training/evaluation budget does each row use?
+4. What method, system/model, condition, capacity proxy, dataset or input, and
+   execution/evaluation budget does each row use?
 5. Should the table be read as a ranking, ablation, paired baseline comparison,
    scaling check, robustness check, or stress test?
 6. Which metrics support the conclusion, and which metrics are auxiliary?
 7. What can this experiment prove by itself, and what requires another table?
+
+## Scale The Artifact
+
+Use the lightest structure that preserves the evidence boundary.
+
+- Short notes or README updates can be concise, but should still state question,
+  comparison, observation, interpretation, and boundary.
+- Full reports should include common protocol, glossary, experiment sections,
+  result tables, and takeaways.
+- Reviews should lead with concrete issues and only propose a rewrite structure
+  when the current artifact cannot support the intended conclusion.
 
 ## Recommended Structure
 
@@ -38,8 +61,8 @@ Use this order unless the artifact requires a different one:
 ### Header
 
 - Name the experiment and comparison logic.
-- Prefer "N scaling check" over "N=1024 results" when the result is meaningful
-  only against smaller-N baselines.
+- Prefer "scale or difficulty sweep" over "large-setting result" when the
+  result is meaningful only against smaller or easier baselines.
 - State whether the section is a sanity check, negative control, ablation,
   capacity check, robustness check, scaling check, or stress test.
 
@@ -73,9 +96,9 @@ Then add section-specific variable columns:
 
 Only then add metric columns.
 
-Avoid using internal labels such as `none-small`, `big`, `series`, `v2`, or
+Avoid using internal labels such as `baseline-a`, `large`, `series`, `v2`, or
 `ours-lite` as the only identity. If labels remain useful, define them nearby
-and still show the real method/model/setting.
+and still show the real method/system/setting.
 
 ## Baseline Pairing
 
@@ -101,7 +124,8 @@ into the section that already owns that axis.
 If the new experiment uses a different budget, still keep it on the relevant
 axis when that is the meaningful comparison, but add explicit budget columns
 such as steps, batch size, evaluation samples, decoding steps, sampling steps,
-or ODE steps. Narrow the conclusion to the tested budget.
+solver steps, or another domain-specific compute or evaluation budget. Narrow
+the conclusion to the tested budget.
 
 ## Metric Discipline
 
@@ -128,11 +152,12 @@ Write each conclusion as:
 Example:
 
 ```text
-The independent-token model still produces many illegal mixed patterns on the
-harder all-same task. Combined with its failure on the easier task, this points
-to a structural limitation from missing token communication, not a one-off
-training failure. This does not prove that all MLPs fail, because the global
-MLP can succeed when it sees all tokens jointly.
+Method A satisfies the primary metric on the easy setting but fails the hard
+constraint metric on the stress setting under the same budget. Combined with
+the matched-budget baseline, this suggests the failure is tied to the method's
+handling of the harder condition rather than random evaluation noise. This does
+not prove Method A is generally worse, because only one task family and one
+budget regime were tested.
 ```
 
 ## Report Anti-patterns

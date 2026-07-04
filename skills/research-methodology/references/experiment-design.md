@@ -75,7 +75,8 @@ Check whether these are fixed:
   conditioning mechanisms.
 
 If a control differs, do not hide it in prose. Add a table column such as
-`steps`, `batch`, `eval samples`, `ODE steps`, `params`, or `device`.
+`steps`, `batch`, `eval samples`, `solver steps`, `sampling steps`, `params`,
+`device`, or another domain-specific budget column.
 
 ## Evidence Quality
 

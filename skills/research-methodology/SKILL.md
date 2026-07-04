@@ -3,11 +3,12 @@ name: research-methodology
 description: |
   End-to-end research methodology skill. Use when the user asks Codex to plan,
   run, analyze, compare, review, or document research, experiments, benchmarks,
-  ablations, empirical investigations, toy studies, or exploratory technical
-  work. Covers question framing, hypothesis and variable design, fair experiment
-  comparison, evidence analysis, report writing, and method distillation.
+  ablations, empirical investigations, small-scale studies, or exploratory
+  technical work. Covers question framing, hypothesis and variable design, fair
+  experiment comparison, evidence analysis, report writing, and method
+  distillation.
 metadata:
-  version: 0.2.0
+  version: 0.2.1
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/research-methodology
   tags:
     - research
@@ -33,7 +34,29 @@ question -> hypothesis -> experiment design -> execution -> analysis -> report -
 Do not let implementation details, result tables, or one-off follow-up runs
 detach from the question they are supposed to answer.
 
+## Scope And Language
+
+Translate this workflow to the current domain's own variables and evidence
+type. Do not assume the project uses the examples in this skill; map local
+concepts onto roles such as method, model or system, data, condition, budget,
+metric, and boundary.
+
+Respond in the user's language unless the target artifact, paper, report, or
+repository convention requires another language.
+
 ## Workflow
+
+### 0. Read Existing Context First
+
+For continuation, analysis, or report revision tasks, read the existing project
+context before proposing structure:
+
+- README, docs, reports, tables, and task notes;
+- configs, run metadata, logs, or result files that define the experiment;
+- prior conclusions, caveats, and pending follow-ups.
+
+Do not impose this skill's report shape before understanding the artifact the
+user already has.
 
 ### 1. Frame The Research Question
 
@@ -59,6 +82,10 @@ Separate:
 
 Prefer changing one primary variable per comparison surface. If multiple
 variables must change, state the limitation before interpreting the result.
+
+When the domain is not machine learning, rename these roles instead of forcing
+ML vocabulary. For example, "model" may become policy, intervention, workflow,
+instrument, simulator, dataset, or human process.
 
 For detailed experiment design and fairness checks, read
 `references/experiment-design.md`.
@@ -92,6 +119,10 @@ Make experiments reproducible enough for the current research stage:
 - keep local scratch artifacts out of commits unless they are the chosen data
   snapshot for a report;
 - prefer small smoke tests before long runs.
+
+Before launching long training runs, large benchmarks, paid API batches, GPU
+jobs, or token-heavy evaluations, present the plan and wait for user approval
+unless the user has already authorized that cost.
 
 For implementation work, keep the code structure simple enough to support the
 next experiment. Avoid abstractions that do not yet remove real complexity.
@@ -128,7 +159,8 @@ At the end of a research cycle, identify what should persist:
 
 - project docs: experiment-specific instructions and results;
 - wiki/memory: cross-project context, user preferences, or project state;
-- skill: reusable methodology likely to apply across future projects;
+- skill repo: only when the user explicitly asks to create or update a reusable
+  skill;
 - code: reusable scripts only when they remove repeated manual work.
 
 Do not promote a one-off observation to a general method until it has survived
