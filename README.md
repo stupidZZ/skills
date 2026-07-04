@@ -10,7 +10,7 @@ references, scripts, or assets the skill needs.
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
 | [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.19 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
-| [`research-methodology`](skills/research-methodology/) | 0.2.1 | 端到端研究方法论：问题定义、实验设计、运行分析、报告写作和方法沉淀。 | [Agent spec](skills/research-methodology/SKILL.md) |
+| [`research-methodology`](skills/research-methodology/) | 0.2.1 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
 | [`zz-wiki-context`](skills/zz-wiki-context/) | 0.1.0 | 选择性读取 zz-wiki，为任务加载个人上下文、项目记忆和 skill 路由信息。 | [Agent spec](skills/zz-wiki-context/SKILL.md) |
 
 ## Layout
