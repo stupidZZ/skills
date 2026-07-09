@@ -18,7 +18,6 @@
       "wiki:wiki:readonly",
       "search:docs:read",
       "task:task:read",
-      "task:task:write",
       "task:task:writeonly"
     ]
   }

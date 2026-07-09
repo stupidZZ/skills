@@ -3,6 +3,51 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.21 – request only task:task:writeonly during OAuth
+
+User hit a Feishu OAuth authorization-page error before the callback:
+
+```text
+task:write 有误，请修改后重试
+错误码：20043
+```
+
+Current 0.3.20 still requested both task-write scope names in the
+OAuth URL:
+
+- ``task:task:write``
+- ``task:task:writeonly``
+
+Earlier versions assumed the OAuth handshake would silently ignore an
+unrecognised task-write alias. In the current Feishu authorize page it
+instead hard-fails when the unsupported alias is present. For this
+installation, ``task:task:write`` is rejected while
+``task:task:writeonly`` is accepted.
+
+Fix:
+
+- ``permissions/required-scopes.json`` now requests only
+  ``task:task:writeonly`` for user OAuth.
+- ``permissions/README.md`` explains the distinction: the runtime
+  write-scope probe can still recognise either name when diagnosing
+  old installs, but fresh OAuth URLs must not include both at once.
+
+No runtime code change is needed because ``_default_install_scopes`` is
+already derived from the manifest. After upgrading, ``bootstrap.py
+reauth`` will produce an authorize URL without ``task:task:write``.
+
+Migration:
+
+- Upgrade to 0.3.21.
+- ``permissions-check`` will report ``status=changed`` because the
+  manifest fingerprint changed. Re-import the new manifest (or if you
+  already removed ``task:task:write`` manually, just run
+  ``permissions-mark-imported`` after verifying Feishu has the same
+  effective scopes published).
+- Run ``bootstrap.py reauth`` again and use the new auth URL.
+
+Bumped SKILL.md to 0.3.21; top-level README skill row to 0.3.21.
+
 ## 0.3.20 – scrub OAuth/runtime state from update backups
 
 User hit repeated Feishu OAuth ``invalid_grant`` failures even after

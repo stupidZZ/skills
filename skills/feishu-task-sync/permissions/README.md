@@ -55,16 +55,17 @@ instead of toggling each scope by hand.
   asks for during OAuth (`bootstrap.py install` step 1). They must all be
   present **and the new app version must be published** before
   authorisation will succeed for an arbitrary user.
-  * Feishu currently exposes the task-write capability under two names
-    (`task:task:write` and `task:task:writeonly`). Different tenants /
-    versions of the developer console surface only one of them at a time,
-    and the OAuth handshake will silently drop whichever name is not
-    registered on the application. The manifest lists both; the import
-    flow will skip the one your tenant does not recognise, but enabling
-    either is sufficient for the skill to create tasks. (You may sometimes see
-  scope coverage take effect without a published version if you are
-  testing under the developer's own account, but treat that as undefined
-  behaviour; always publish before sharing the Skill with another user.)
+  * Feishu has exposed the task-write capability under two names across
+    console/API generations: `task:task:write` and `task:task:writeonly`.
+    In current Feishu OAuth authorize pages, sending the unrecognised one
+    can hard-fail the authorization page with `task:write 有误` / error
+    code `20043`. The manifest therefore requests only
+    `task:task:writeonly` by default. The runtime write-scope probe still
+    recognises both names when diagnosing old installations, but fresh
+    OAuth URLs must not include both at once. (You may sometimes see scope
+  coverage take effect without a published version if you are testing
+  under the developer's own account, but treat that as undefined behaviour;
+  always publish before sharing the Skill with another user.)
 
 ## Bumping this file
 
