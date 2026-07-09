@@ -3,6 +3,41 @@
 All notable changes to the `feishu-task-sync` Skill are documented here. The
 Skill follows [Semantic Versioning](https://semver.org/).
 
+## 0.3.20 – scrub OAuth/runtime state from update backups
+
+User hit repeated Feishu OAuth ``invalid_grant`` failures even after
+reauthorising. Root cause investigation found many timestamped update
+backup directories under ``~/.kian/skills/installed/`` that still
+contained ``state/user-auth.json`` and ``config.json``. If any old
+process, stale cron content, or manual command points at one of those
+backup directories, it can attempt to refresh an old one-time
+``refresh_token``. Feishu treats a reused refresh token as revoked and
+can break the live grant chain.
+
+Immediate local cleanup was performed on the user's machine: cron was
+paused, old ``feishu-task-sync.bak-*`` directories were removed, and
+only the active ``feishu-task-sync/state/user-auth.json`` remained.
+
+Permanent fix in this release:
+
+- ``scripts/updater.py`` still creates a ``feishu-task-sync.bak-<ts>``
+  directory for code rollback, but after restoring user-owned data
+  into the new install it **scrubs runtime/secret-bearing paths from
+  the backup**:
+  - ``config.json``
+  - ``config.json.bak-*``
+  - ``state/`` (including ``user-auth.json``)
+  - ``output/``
+- ``apply_update`` returns and records ``backup_scrubbed_relpaths`` in
+  the post-update marker so users can audit what was removed from the
+  backup.
+
+This means future backup directories are code-only. Accidentally
+running a script from a backup directory will fail fast due to missing
+``config.json`` instead of silently using stale OAuth tokens.
+
+Bumped SKILL.md to 0.3.20; top-level README skill row to 0.3.20.
+
 ## 0.3.19 – reduce IM fetch concurrency and retry Feishu rate limits
 
 User observed a heartbeat with ``failed_chats=128``. Investigation of

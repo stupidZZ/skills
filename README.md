@@ -9,7 +9,7 @@ references, scripts, or assets the skill needs.
 
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
-| [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.19 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
+| [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.20 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
 | [`research-methodology`](skills/research-methodology/) | 0.2.1 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
 | [`zz-wiki-context`](skills/zz-wiki-context/) | 0.1.0 | 选择性读取 zz-wiki，为任务加载个人上下文、项目记忆和 skill 路由信息。 | [Agent spec](skills/zz-wiki-context/SKILL.md) |
 
@@ -73,15 +73,5 @@ example `feishu-task-sync`) and they will appear in the running agent.
 
 ## Versioning
 
-Each skill maintains its own version in `SKILL.md` metadata and may have an
-optional `CHANGELOG.md`. Use [SemVer](https://semver.org/):
-`MAJOR.MINOR.PATCH`. Bump `MAJOR` for breaking changes (e.g. new required
-OAuth scopes, incompatible state schemas) so users can decide when to migrate.
-
-Repository‑wide releases are cut by tagging `vYYYY.MM.DD` or a SemVer of the
-repo as a whole; that is independent from individual Skill versions.
-
-## Disclaimer
-
-Skills here are provided as‑is. Always inspect a Skill before letting it
-operate against production accounts.
+Use SemVer per Skill. Bump a Skill's frontmatter `version` whenever behaviour
+or references change. Keep the table above in sync for user-facing discovery.

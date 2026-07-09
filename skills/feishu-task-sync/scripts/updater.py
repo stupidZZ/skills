@@ -195,6 +195,19 @@ PRESERVE_RELATIVE = (
     "output",
 )
 
+# Runtime / secret-bearing paths that must never remain inside a
+# timestamped code backup. Older updater versions kept the whole old
+# install directory as feishu-task-sync.bak-<ts>, including
+# state/user-auth.json and config.json. If any old process or user
+# command pointed at that backup later, Feishu saw a stale refresh_token
+# being reused and revoked the live grant. 0.3.20 scrubs these from
+# backups immediately after restoring them into the new install.
+SCRUB_BACKUP_RELATIVE = (
+    "config.json",
+    "state",
+    "output",
+)
+
 
 def _checkout_repository(repository: str, branch: str, workdir: Path) -> Path:
     target = workdir / "repo"
@@ -207,8 +220,33 @@ def _checkout_repository(repository: str, branch: str, workdir: Path) -> Path:
     return target
 
 
-def _replace_skill_dir(new_source: Path, skill_dir: Path) -> Path:
-    """Move ``skill_dir`` aside, copy ``new_source`` into its place."""
+def _scrub_backup_runtime_state(backup: Path) -> List[str]:
+    removed: List[str] = []
+    for rel in SCRUB_BACKUP_RELATIVE:
+        target = backup / rel
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            removed.append(rel)
+    # Historical config backups can also contain app_secret / state path
+    # references; remove them from code backups as well.
+    for target in backup.glob("config.json.bak-*"):
+        try:
+            target.unlink()
+            removed.append(target.name)
+        except OSError:
+            pass
+    return removed
+
+
+def _replace_skill_dir(new_source: Path, skill_dir: Path) -> Tuple[Path, List[str]]:
+    """Move ``skill_dir`` aside, copy ``new_source`` into its place.
+
+    Returns ``(backup_path, scrubbed_relpaths)``. The backup is retained
+    for code rollback only; runtime state and secrets are scrubbed.
+    """
 
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     backup = skill_dir.with_name(f"{skill_dir.name}.bak-{timestamp}")
@@ -233,7 +271,8 @@ def _replace_skill_dir(new_source: Path, skill_dir: Path) -> Path:
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
-    return backup
+    scrubbed = _scrub_backup_runtime_state(backup)
+    return backup, scrubbed
 
 
 def _rollback(backup: Path, skill_dir: Path) -> None:
@@ -313,7 +352,7 @@ def apply_update(settings: Settings, *, from_version: Optional[str] = None, to_v
         new_source = repo_root / settings.updates.skill_path
         if not new_source.exists():
             raise RuntimeError(f"upstream repository does not contain {settings.updates.skill_path}.")
-        backup = _replace_skill_dir(new_source, SKILL_DIR)
+        backup, scrubbed_from_backup = _replace_skill_dir(new_source, SKILL_DIR)
         highlights = _extract_changelog_highlights(SKILL_DIR, to_version)
         marker_payload = {
             "from_version": from_version,
@@ -325,6 +364,7 @@ def apply_update(settings: Settings, *, from_version: Optional[str] = None, to_v
             "skill_path": settings.updates.skill_path,
             "applied_at": datetime.now().isoformat(),
             "changelog_highlights": highlights,
+            "backup_scrubbed_relpaths": scrubbed_from_backup,
         }
         marker_written = _write_post_update_marker(SKILL_DIR, marker_payload)
         return {
@@ -336,6 +376,7 @@ def apply_update(settings: Settings, *, from_version: Optional[str] = None, to_v
             "skill_path": settings.updates.skill_path,
             "post_update_marker": str(marker_written) if marker_written else None,
             "changelog_highlights": highlights,
+            "backup_scrubbed_relpaths": scrubbed_from_backup,
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
