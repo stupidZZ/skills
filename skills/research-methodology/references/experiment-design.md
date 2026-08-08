@@ -78,6 +78,68 @@ If a control differs, do not hide it in prose. Add a table column such as
 `steps`, `batch`, `eval samples`, `solver steps`, `sampling steps`, `params`,
 `device`, or another domain-specific budget column.
 
+## Protocol Generations
+
+When an exploratory round has accumulated confounds, define a new protocol
+generation before drawing stronger conclusions. A good reset states:
+
+- which old rows are exploratory only;
+- the research questions and comparison axes for the new round;
+- fixed controls and allowed changed variables;
+- required metadata columns for every table;
+- convergence checks and stopping or probe rules.
+
+Do not mix rows from different protocol generations unless the table includes
+the differing budget or protocol columns and the conclusion is narrowed.
+
+## Scaling And Compute Limits
+
+Scaling experiments are especially easy to confound. When increasing problem
+size, keep batch size, train steps, evaluation samples, sampling or integration
+budget, optimizer, seeds, and model family fixed unless one of them is the
+explicit variable.
+
+If hardware forces a different budget, classify the run as one of:
+
+- full-budget row: comparable to the rest of the axis;
+- budget probe: tests whether a failure may be unconverged;
+- compute probe: estimates feasibility or early dynamics only;
+- stress test: deliberately changes the protocol to expose a limit.
+
+Keep probes near the scaling table they inform, but do not include them in the
+same ranking as full-budget rows.
+
+## Batch Size And Execution Details
+
+For distribution-matching methods, batch size can be part of the estimator, not
+just a throughput knob. Treat effective batch size as a protocol variable.
+
+Record execution details separately when needed:
+
+- effective batch size: samples contributing to one optimizer update;
+- micro-batch size: memory split used to accumulate that update;
+- estimator caveat: whether splitting preserves the objective.
+
+Gradient accumulation preserves per-sample mean losses such as MSE or flow
+matching. It does not preserve a batch-level objective such as MMD unless the
+implementation still computes the same pairwise terms over the full effective
+batch.
+
+## Convergence Checks
+
+A failed final metric is not enough evidence for an architectural or objective
+limitation. Check whether the training evidence supports convergence:
+
+- loss tail mean, variance, and slope;
+- metric trend, not just final metric;
+- stability across seeds;
+- longer-budget probe for important negative results;
+- alternate learning rate or optimizer only when the loss is noisy or divergent.
+
+If a row is still improving, label it budget-limited. If a row is valid but not
+calibrated, separate the validity conclusion from the distribution-match
+conclusion.
+
 ## Evidence Quality
 
 A useful experiment should support three statements:

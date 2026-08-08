@@ -8,7 +8,7 @@ description: |
   experiment comparison, evidence analysis, report writing, and method
   distillation.
 metadata:
-  version: 0.2.1
+  version: 0.3.0
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/research-methodology
   tags:
     - research
@@ -87,6 +87,16 @@ When the domain is not machine learning, rename these roles instead of forcing
 ML vocabulary. For example, "model" may become policy, intervention, workflow,
 instrument, simulator, dataset, or human process.
 
+When an earlier round mixed controls, explicitly declare a new protocol
+generation instead of patching conclusions in place. Treat the old round as
+exploratory unless each row passes the new fairness checklist.
+
+Separate semantic variables from execution details. For example, effective
+batch size, training steps, evaluation samples, and sampling/integration steps
+are part of the experiment protocol. Micro-batch size, checkpointing, or other
+memory workarounds are execution details only when they preserve the same
+mathematical objective; otherwise they become changed variables.
+
 For detailed experiment design and fairness checks, read
 `references/experiment-design.md`.
 
@@ -105,6 +115,10 @@ Do not create isolated follow-up sections when the result only makes sense
 relative to an existing baseline. Add the new result to the table or analysis
 surface that owns the axis.
 
+Compute-limited probes and stress tests still belong near the axis they inform,
+but must be labeled as probes and kept out of full-budget rankings unless their
+protocol matches the comparison rows.
+
 If the follow-up uses a different budget, keep it on the relevant axis when
 that is still the meaningful comparison, but add explicit budget columns and
 narrow the conclusion.
@@ -118,6 +132,9 @@ Make experiments reproducible enough for the current research stage:
 - record seed, budget, device, and evaluation settings;
 - keep local scratch artifacts out of commits unless they are the chosen data
   snapshot for a report;
+- record both effective protocol values and execution details when they differ;
+- keep raw histories or summaries that allow convergence to be audited;
+- generate aggregate reports from run artifacts when tables are revised often;
 - prefer small smoke tests before long runs.
 
 Before launching long training runs, large benchmarks, paid API batches, GPU
@@ -144,6 +161,13 @@ Use more than one metric when one metric can be misleading. Typical categories:
 - stability: does it hold across seeds, subsets, or reruns?
 - cost: parameters, runtime, samples, tokens, or human effort.
 
+Check convergence before converting a bad metric into a limitation claim. If a
+loss or key metric is still moving, or if a longer run materially changes the
+result, label the row budget-limited. If one metric saturates, add another that
+distinguishes remaining behavior, such as calibration after validity succeeds
+or nearest-mode error when exact-match metrics become uninformative at large
+scale.
+
 ### 6. Write Or Revise The Report
 
 When the user asks for a report, analysis page, benchmark summary, ablation
@@ -152,6 +176,11 @@ writeup, or review of an existing report, read `references/report-writing.md`.
 The report should be self-contained: a reader should not need to inspect source
 configs or logs to know what each row means, why it is comparable, or what
 conclusion is justified.
+
+When a report has become confusing, fix the experiment surface, not only the
+wording. Add setting blocks, identity columns, budget columns, and paired
+baselines to the same section. Remove or quarantine old exploratory rows that
+would otherwise keep conflicting with the new interpretation.
 
 ### 7. Distill Reusable Method
 
@@ -202,6 +231,12 @@ Avoid:
 - adding a stress test as a standalone result when it belongs in a scaling
   table;
 - reporting only the metric that makes a method look best;
+- silently changing batch size, evaluation samples, integration steps, or model
+  capacity inside a scaling comparison;
+- treating micro-batch or other memory workarounds as invisible when they
+  change the objective or estimator;
 - treating a budget-mismatched stress point as a fair ranking;
+- claiming non-convergence as a method failure without a budget or loss-trend
+  check;
 - writing conclusions that require the reader to jump between tables;
 - turning a report-format rule into the whole research methodology.

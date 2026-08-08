@@ -78,6 +78,24 @@ Write the setting before the table:
 - fairness caveats;
 - intended reading: what rows or columns should be compared.
 
+### Protocol And Budget Columns
+
+If a report combines exploratory runs, full-budget rows, and probes, make the
+status visible in the table or section header. Do not rely on prose elsewhere.
+
+Include budget columns whenever they can affect interpretation:
+
+- train steps or wall-clock budget;
+- effective batch size and micro-batch size when they differ;
+- evaluation samples;
+- sampling, decoding, or integration steps;
+- parameter count or capacity proxy;
+- seed count and seed set.
+
+When a row uses a different budget because of compute limits, label it as a
+probe or stress test and narrow the conclusion to feasibility, trend, or
+boundary evidence.
+
 ### Result Table
 
 Put identity columns before metrics:
@@ -121,6 +139,12 @@ Do not default to creating a new standalone section for every new experiment.
 First identify which comparison axis the experiment changes, then merge it back
 into the section that already owns that axis.
 
+If a section only becomes meaningful when read against another section, merge
+the relevant rows. Examples include adding N=4 to an N-scaling table that
+already has N=2, adding batch=1 to a batch-size sweep, or adding a new timestep
+variant to the timestep-conditioning ablation. The reader should not need to
+reconstruct the baseline manually.
+
 If the new experiment uses a different budget, still keep it on the relevant
 axis when that is the meaningful comparison, but add explicit budget columns
 such as steps, batch size, evaluation samples, decoding steps, sampling steps,
@@ -140,6 +164,14 @@ Define every metric the first time it appears. Separate:
 Warn when a metric is insufficient by itself. For example, accuracy can be high
 under mode collapse, so a report may also need distribution distance, per-mode
 rates, calibration, or diversity metrics.
+
+When one metric saturates, add a metric that remains informative. For example,
+an exact validity metric may become all-or-nothing at large scale, while a
+nearest-mode distance can still show partial structure. Conversely, a validity
+metric can look perfect under mode collapse, so keep a distribution-match or
+mode-balance metric nearby.
+
+Define every abbreviation and internal label before it appears in analysis.
 
 ## Conclusion Pattern
 
@@ -171,6 +203,10 @@ Avoid:
 - conclusions based on a table in another section without pairing the baseline;
 - unexplained abbreviations or internal run labels;
 - reporting only the metric that makes a method look best;
+- mixing protocol generations without labeling which rows are exploratory,
+  full-budget, probes, or stress tests;
+- presenting compute-limited probes as evidence of method ranking;
+- hiding convergence uncertainty behind a final metric;
 - saying "method A is better" when the experiment only tested one task, one
   seed range, one budget, or one capacity regime;
 - burying caveats in code comments or config files instead of the report.
