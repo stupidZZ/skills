@@ -13,7 +13,10 @@ references, scripts, or assets the skill needs.
 | [`domain-owned-refactoring`](skills/domain-owned-refactoring/) | 0.1.0 | Architecture refactoring workflow for ownership, domain boundaries, dependency direction, shared core gates, and stopping criteria. | [Agent spec](skills/domain-owned-refactoring/SKILL.md) |
 | [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.1.0 | ML/RL experiment systems engineering: configs, rollout/reward/evaluation boundaries, provenance, artifacts, and reviewability. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
 | [`research-methodology`](skills/research-methodology/) | 0.3.0 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
-| [`zz-wiki-context`](skills/zz-wiki-context/) | 0.1.0 | 选择性读取 zz-wiki，为任务加载个人上下文、项目记忆和 skill 路由信息。 | [Agent spec](skills/zz-wiki-context/SKILL.md) |
+
+`zz-wiki-context` is project infrastructure and has moved to
+[`world-sim-dev/zz-wiki`](https://github.com/world-sim-dev/zz-wiki/tree/main/skills/zz-wiki-context),
+where its loader, wiki schema, and bootstrap protocol can evolve atomically.
 
 ## Layout
 
@@ -23,7 +26,6 @@ skills/
   feishu-task-sync/      # Sync Feishu chats / docs / wiki into Feishu Tasks
   ml-rl-experiment-engineering/ # ML/RL experiment system design and review
   research-methodology/  # End-to-end research workflow
-  zz-wiki-context/       # Personal wiki context loader
 template/                # Minimal SKILL.md template used as a starting point
 ```
 
@@ -35,14 +37,12 @@ directory:
 ```bash
 mkdir -p ~/.agents/skills
 ln -s ~/Code/skills/skills/research-methodology ~/.agents/skills/research-methodology
-ln -s ~/Code/skills/skills/zz-wiki-context ~/.agents/skills/zz-wiki-context
 ```
 
 Then invoke it in Codex with `/skills` or explicitly in a prompt:
 
 ```text
 $research-methodology
-$zz-wiki-context
 ```
 
 Restart Codex if a newly linked skill does not appear.
