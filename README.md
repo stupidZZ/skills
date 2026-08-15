@@ -10,6 +10,8 @@ references, scripts, or assets the skill needs.
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
 | [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.21 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
+| [`domain-owned-refactoring`](skills/domain-owned-refactoring/) | 0.1.0 | Architecture refactoring workflow for ownership, domain boundaries, dependency direction, shared core gates, and stopping criteria. | [Agent spec](skills/domain-owned-refactoring/SKILL.md) |
+| [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.1.0 | ML/RL experiment systems engineering: configs, rollout/reward/evaluation boundaries, provenance, artifacts, and reviewability. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
 | [`research-methodology`](skills/research-methodology/) | 0.3.0 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
 | [`zz-wiki-context`](skills/zz-wiki-context/) | 0.1.0 | 选择性读取 zz-wiki，为任务加载个人上下文、项目记忆和 skill 路由信息。 | [Agent spec](skills/zz-wiki-context/SKILL.md) |
 
@@ -17,7 +19,9 @@ references, scripts, or assets the skill needs.
 
 ```
 skills/
+  domain-owned-refactoring/  # Architecture refactoring by ownership and domain boundaries
   feishu-task-sync/      # Sync Feishu chats / docs / wiki into Feishu Tasks
+  ml-rl-experiment-engineering/ # ML/RL experiment system design and review
   research-methodology/  # End-to-end research workflow
   zz-wiki-context/       # Personal wiki context loader
 template/                # Minimal SKILL.md template used as a starting point
