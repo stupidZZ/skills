@@ -1,0 +1,4 @@
+interface:
+  display_name: "ML/RL Experiment Engineering"
+  short_description: "Preserve semantics in ML and RL experiment systems"
+  default_prompt: "Use $ml-rl-experiment-engineering to design or review this experiment system."
