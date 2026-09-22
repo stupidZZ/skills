@@ -7,7 +7,7 @@ description: |
   provenance, or run artifacts. Focuses on preserving experimental meaning,
   reproducibility, and fair comparison while changing code or configs.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/ml-rl-experiment-engineering
   tags:
     - machine-learning
@@ -18,6 +18,9 @@ metadata:
 ---
 
 # ML/RL Experiment Engineering
+
+For metric, configuration and historical-evidence counterexamples, read
+[semantic lessons](references/semantic-lessons.md) when interpreting those boundaries.
 
 Use this skill when code structure, configuration, or pipeline design can
 change the meaning of an ML/RL experiment. The goal is not only cleaner code;
@@ -115,19 +118,18 @@ Place fields where they are consumed and where their lifecycle belongs:
 - logger credentials or project names -> logging config, with secrets outside
   tracked files.
 
-When backends have different capabilities, prefer capability-specific types
-over one permissive dictionary plus runtime failures.
+When backends have different capabilities, express their constraints with
+capability-specific types or validated dictionaries rather than runtime surprises.
 
 ### 4. Keep Formal Experiment Configs Complete
 
 Formal configs should be independently reviewable recipes:
 
-- they declare the final effective values directly;
+- they expose complete final effective values for review;
 - they use shared typed schema and cross-field validation;
-- they do not load another experiment config at runtime;
-- they do not import another experiment's `CONFIG`;
-- they do not use `dataclasses.replace()` or mutable overrides to define a
-  formal paired arm;
+- mutable inheritance must not silently change a formal paired arm; shared
+  configuration mechanisms are acceptable when effective settings are frozen,
+  inspectable and reproducible;
 - they save JSON-safe effective config snapshots with run artifacts;
 - they fail early on typos, illegal values, or unsupported capability combos.
 

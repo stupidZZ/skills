@@ -10,13 +10,17 @@ references, scripts, or assets the skill needs.
 | Skill | Version | One-liner | Docs |
 | --- | --- | --- | --- |
 | [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.21 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
-| [`domain-owned-refactoring`](skills/domain-owned-refactoring/) | 0.1.0 | Architecture refactoring workflow for ownership, domain boundaries, dependency direction, shared core gates, and stopping criteria. | [Agent spec](skills/domain-owned-refactoring/SKILL.md) |
-| [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.1.0 | ML/RL experiment systems engineering: configs, rollout/reward/evaluation boundaries, provenance, artifacts, and reviewability. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
-| [`research-methodology`](skills/research-methodology/) | 0.3.0 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
+| [`domain-owned-refactoring`](skills/domain-owned-refactoring/) | 0.2.0 | Architecture refactoring workflow for ownership, domain boundaries, dependency direction, shared core gates, and stopping criteria. | [Agent spec](skills/domain-owned-refactoring/SKILL.md) |
+| [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.2.0 | ML/RL experiment systems engineering: configs, rollout/reward/evaluation boundaries, provenance, artifacts, and reviewability. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
+| [`research-methodology`](skills/research-methodology/) | 0.3.1 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
+
+| [`task-first-ui-ux`](skills/task-first-ui-ux/) | 0.1.0 | Task-oriented information design and evidence-based interaction repair. | [Agent spec](skills/task-first-ui-ux/SKILL.md) |
+| [`contract-first-domain-design`](skills/contract-first-domain-design/) | 0.1.0 | Minimal domain models, machine contracts and failure semantics. | [Agent spec](skills/contract-first-domain-design/SKILL.md) |
+| [`project-wiki-maintenance`](skills/project-wiki-maintenance/) | 0.1.0 | Canonical docs, generated reading views and page/section change review. | [Agent spec](skills/project-wiki-maintenance/SKILL.md) |
 
 `zz-wiki-context` is project infrastructure and has moved to
 [`world-sim-dev/zz-wiki`](https://github.com/world-sim-dev/zz-wiki/tree/main/skills/zz-wiki-context),
-where its loader, wiki schema, and bootstrap protocol can evolve atomically.
+where its loader, wiki protocol and tool adapters are maintained.
 
 ## Layout
 
@@ -26,6 +30,9 @@ skills/
   feishu-task-sync/      # Sync Feishu chats / docs / wiki into Feishu Tasks
   ml-rl-experiment-engineering/ # ML/RL experiment system design and review
   research-methodology/  # End-to-end research workflow
+  task-first-ui-ux/      # Task structure, interaction repair and verification
+  contract-first-domain-design/ # Minimal domain models and consumer contracts
+  project-wiki-maintenance/ # Canonical docs and derived reading views
 template/                # Minimal SKILL.md template used as a starting point
 ```
 
