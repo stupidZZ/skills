@@ -7,7 +7,7 @@ description: |
   unclear. Helps turn broad cleanup into scoped refactor hypotheses, vertical
   migrations, fitness tests, and stopping criteria.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/domain-owned-refactoring
   tags:
     - architecture
@@ -18,6 +18,9 @@ metadata:
 ---
 
 # Domain-Owned Refactoring
+
+For examples distinguishing workflows, roles and shared capabilities, read
+[ownership lessons](references/ownership-lessons.md) when those boundaries are unclear.
 
 Use this skill when architecture work risks becoming directory rearrangement,
 generic cleanup, or premature extraction into `core`, `common`, or `utils`.

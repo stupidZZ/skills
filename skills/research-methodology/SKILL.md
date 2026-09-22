@@ -8,7 +8,7 @@ description: |
   experiment comparison, evidence analysis, report writing, and method
   distillation.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/research-methodology
   tags:
     - research
@@ -187,7 +187,8 @@ would otherwise keep conflicting with the new interpretation.
 At the end of a research cycle, identify what should persist:
 
 - project docs: experiment-specific instructions and results;
-- wiki/memory: cross-project context, user preferences, or project state;
+- wiki/memory: durable personal preferences or transferable knowledge, only
+  when the user requests persistence; project state stays in project docs;
 - skill repo: only when the user explicitly asks to create or update a reusable
   skill;
 - code: reusable scripts only when they remove repeated manual work.
