@@ -1,8 +1,8 @@
 ---
 name: task-first-ui-ux
-description: Design, review or repair task-oriented data interfaces, comparison tables, ranking inputs, charts and interactive detail views. Use when users struggle to compare, interpret or manipulate information, or when an interaction fix needs real behavioral verification.
+description: Design, review or repair user-facing information and interactions, including data comparisons, charts and documentation navigation. Use for how users find, understand or manipulate information; not for backend architecture, plain prose edits or experiment validity.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
 ---
 
 # Task-First UI/UX
@@ -12,6 +12,12 @@ interface, real data, project conventions and any supplied visual reference.
 Keep the scope proportional: a broken drag interaction rarely needs a redesign.
 This skill focuses on information structure and interaction evidence; respect
 the project's visual system and accessibility requirements.
+
+For documentation navigation, search or change-review interfaces, read
+[documentation reading](references/documentation-reading.md) instead of imposing
+the data-editing journey below. Plain Markdown edits need neither browser checks
+nor a generated site. Generator ownership and source contracts belong to
+`software-design` only when those decisions also need work.
 
 ## Design The Task Surface
 
@@ -54,7 +60,8 @@ fix as unverified rather than repeatedly claiming resolution.
 
 - Computation tests verify data invariants; event tests verify transitions;
   screenshots verify layout; actual interaction verifies the usable journey.
-- Walk the main journey: empty -> edit -> apply -> detail -> edit again.
+- Walk the actual main journey. For editable data, this may be empty -> edit ->
+  apply -> detail -> edit again; for documentation, search -> page -> section -> back.
 - Check scrolling retains identity, headers and scope; verify the actual scroll
   container and global CSS, not only the component's sticky declarations.
 - Exercise core click/drag/cancel actions, keyboard alternatives and feedback.

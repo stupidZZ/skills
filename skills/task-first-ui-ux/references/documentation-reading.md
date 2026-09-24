@@ -1,5 +1,10 @@
 # Reading View And Change Review
 
+Use only for a documentation website or generated reading interface. Plain
+Markdown edits do not require this workflow. Current-update batches and badges
+below apply when readers need editorial change review; do not add that feature
+to every documentation site.
+
 A possible small-project layout is Markdown under docs, a curated manifest,
 a deterministic generator with build/check modes and a local UTF-8 preview.
 Existing documentation frameworks can fulfill the same roles. Physical
@@ -41,6 +46,11 @@ palette, card radius or application framework.
 - Use UTF-8 consistently in files, HTML charset and HTTP headers; if a BOM is
   used, ensure the parser handles it. A BOM is not universally required.
 - When offline reading is required, avoid runtime CDN or backend dependencies.
+
+Compare a supplied reference's navigation, search, update area, page summaries,
+section entry points, typography and tables. Functional parity alone is not
+reference fidelity. Exercise navigation, anchors, copyable links, search with
+empty results, history/back and narrow layouts in the actual browser.
 
 Structural tests prove consistency; browser evidence proves that cues are
 visible and interactions work. In an Orca environment, check for the orca CLI

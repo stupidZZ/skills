@@ -1,4 +1,0 @@
-interface:
-  display_name: "Domain-Owned Refactoring"
-  short_description: "Plan and review ownership-centered refactors"
-  default_prompt: "Use $domain-owned-refactoring to plan or review this architecture refactor."

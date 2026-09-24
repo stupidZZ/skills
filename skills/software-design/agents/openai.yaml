@@ -1,0 +1,4 @@
+interface:
+  display_name: "Software Design"
+  short_description: "Design contracts, ownership and safe structural changes"
+  default_prompt: "Use $software-design for the ownership and contract decisions in this task."
