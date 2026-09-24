@@ -1,26 +1,7 @@
----
-name: domain-owned-refactoring
-description: |
-  Use when the user asks an agent to plan, review, execute, or stabilize an
-  architecture refactor where ownership, domain boundaries, dependency
-  direction, shared core packages, compatibility layers, or module structure are
-  unclear. Helps turn broad cleanup into scoped refactor hypotheses, vertical
-  migrations, fitness tests, and stopping criteria.
-metadata:
-  version: 0.2.0
-  homepage: https://github.com/stupidZZ/skills/tree/main/skills/domain-owned-refactoring
-  tags:
-    - architecture
-    - refactoring
-    - ownership
-    - modularity
-    - engineering
----
-
 # Domain-Owned Refactoring
 
 For examples distinguishing workflows, roles and shared capabilities, read
-[ownership lessons](references/ownership-lessons.md) when those boundaries are unclear.
+[ownership lessons](ownership-lessons.md) when those boundaries are unclear.
 
 Use this skill when architecture work risks becoming directory rearrangement,
 generic cleanup, or premature extraction into `core`, `common`, or `utils`.

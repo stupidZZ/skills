@@ -1,13 +1,12 @@
 ---
 name: ml-rl-experiment-engineering
 description: |
-  Use when the user asks an agent to design, review, refactor, or debug ML/RL
-  experiment systems, especially training loops, rollout pipelines, reward
-  contracts, evaluation, checkpoint selection, typed configs, experiment
-  provenance, or run artifacts. Focuses on preserving experimental meaning,
-  reproducibility, and fair comparison while changing code or configs.
+  Protect experimental meaning when implementing or debugging ML/RL objectives,
+  rollout/data contracts, reward and evaluation metrics, checkpoint selection
+  or reproducible configurations. Use when a change can alter what is optimized,
+  measured or reconstructed; not merely because the repository uses ML.
 metadata:
-  version: 0.2.0
+  version: 0.3.0
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/ml-rl-experiment-engineering
   tags:
     - machine-learning
@@ -26,9 +25,12 @@ Use this skill when code structure, configuration, or pipeline design can
 change the meaning of an ML/RL experiment. The goal is not only cleaner code;
 it is preserving what is being optimized, measured, compared, and reproduced.
 
-For general research planning, experiment comparison, benchmark analysis, or
-report writing, combine this with `research-methodology`. This skill is the
-systems-engineering layer for ML/RL experiment repositories.
+For research planning, comparison or report writing without an implementation
+semantics problem, use `research-methodology` instead. Add it only when both
+research design and implementation meaning are in scope. For module ownership
+or contract migrations, use `software-design`; this skill adds experiment-specific
+invariants, not a second general architecture workflow. A UI repair or import
+cleanup in an ML repository does not by itself require this skill.
 
 ## Core Rule
 
@@ -48,7 +50,7 @@ Use this skill for:
 
 - designing or reviewing training, rollout, reward, evaluation, or checkpoint
   selection code;
-- refactoring ML/RL repositories with multiple experiments or products;
+- changing a pipeline where reward, evaluation or artifact semantics may drift;
 - creating, pairing, validating, or reviewing experiment configs;
 - deciding where config fields, provider settings, prompts, datasets, metrics,
   and artifacts belong;
@@ -62,9 +64,9 @@ and evaluation goals.
 
 ## Workflow
 
-### 0. Read The Experiment Truth Sources
+### 0. Read The Relevant Experiment Truth Sources
 
-Inspect the local project before prescribing structure:
+Inspect only the sources needed to establish the semantics at stake:
 
 - `AGENTS.md`, README, docs, configs, schema definitions, and validators;
 - training, rollout, reward, evaluation, logging, and checkpoint code;

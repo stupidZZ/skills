@@ -1,17 +1,10 @@
----
-name: contract-first-domain-design
-description: Turn a product workflow into a minimal domain model and verifiable API or data contracts. Use for new service design, schema and API boundaries, external agent integration, idempotency and reviewing overbuilt object models before implementation.
-metadata:
-  version: 0.1.0
----
-
 # Contract-First Domain Design
 
 Produce a small executable user workflow and contracts that let an independent
 consumer complete it without reading service internals. Inspect the product's
 existing requirements, contracts and owning systems first. For migration of
-existing architecture, use domain-owned-refactoring when available; this skill
-owns design and contract decisions rather than a second refactoring workflow.
+existing architecture, also read [refactoring](refactoring.md) when needed.
+Contract decisions apply to both new systems and changes to existing systems.
 
 ## Workflow
 
@@ -30,7 +23,7 @@ owns design and contract decisions rather than a second refactoring workflow.
    resource references or permissions inside arbitrary JSON. Keep stable resource
    identity separate from temporary URLs and credentials.
 5. Define failure behavior before choosing implementation. Use
-   [contract checks](references/contract-checks.md) for retry timelines, evidence
+   [contract checks](contract-checks.md) for retry timelines, evidence
    ownership and capability probes.
 6. Make positive, negative and concurrent examples executable against schemas
    and semantic validators. State assumptions not yet verified.
