@@ -8,7 +8,7 @@ description: |
   experiment comparison, evidence analysis, report writing, and method
   distillation.
 metadata:
-  version: 0.3.2
+  version: 0.3.1
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/research-methodology
   tags:
     - research
@@ -96,20 +96,6 @@ batch size, training steps, evaluation samples, and sampling/integration steps
 are part of the experiment protocol. Micro-batch size, checkpointing, or other
 memory workarounds are execution details only when they preserve the same
 mathematical objective; otherwise they become changed variables.
-
-For training experiments, proactively complete the task's basic settings before
-launch: optimization and training budget, task-relevant training and validation
-metrics, validation cadence, and checkpoint cadence and retention. Do not treat
-the user's explicitly listed parameters as an exhaustive recipe or wait for
-reminders about routine essentials. Choose reasonable defaults within the
-user's constraints and make their rationale visible.
-
-Choose validation and saving intervals independently using dataset size,
-expected step duration, feedback needs, and evaluation/storage cost. An epoch
-budget does not imply epoch-based validation or saving: a long epoch can delay
-useful feedback and leave too much progress unsaved. Save often enough to
-protect progress without excessive overhead. Keep concrete intervals specific
-to the experiment; do not generalize a single run's step count into a default.
 
 For detailed experiment design and fairness checks, read
 `references/experiment-design.md`.
