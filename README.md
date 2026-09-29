@@ -9,9 +9,8 @@ improvements originally proposed in this repository's PR #3. Complete that migra
 an existing installation; source changes do not automatically update installed plugins.
 
 Active plugin skills are maintained in [zz-wiki/skills](https://github.com/world-sim-dev/zz-wiki/tree/main/skills).
-The old Kian-specific `feishu-task-sync` and template are preserved under
-[zz-wiki/legacy](https://github.com/world-sim-dev/zz-wiki/tree/main/legacy), outside plugin discovery.
-Their preservation does not activate OAuth, task writes, background agents or scheduled jobs.
+The old Kian-specific `feishu-task-sync` and template are not migrated to zz-wiki.
+Their historical sources remain in this retired repository; no legacy mirror or activation is introduced.
 
 No repository history is deleted, and this change does not alter repository visibility or uninstall
 existing skills. Follow the destination repository's installation and migration instructions.
