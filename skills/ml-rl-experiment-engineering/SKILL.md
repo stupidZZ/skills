@@ -6,7 +6,7 @@ description: |
   or reproducible configurations. Use when a change can alter what is optimized,
   measured or reconstructed; not merely because the repository uses ML.
 metadata:
-  version: 0.3.0
+  version: 0.3.1
   homepage: https://github.com/stupidZZ/skills/tree/main/skills/ml-rl-experiment-engineering
   tags:
     - machine-learning
@@ -144,6 +144,27 @@ Protect pair invariants with tests instead of making one arm inherit the other.
 CLI overrides are for bounded probes such as sample limits, dry-run output
 paths, or connectivity checks. Formal runs should be reproducible from the
 standalone config plus saved effective snapshot.
+
+For training recipes, make the basic settings executable and reviewable, not
+merely mentioned in the plan:
+
+- expose learning rate, warmup, effective batch size and total training length;
+- for classification fine-tuning, compute and record training loss and class
+  accuracy, plus held-out loss and task metrics; define whether training
+  accuracy covers the current global batch or another explicit sample set;
+- configure validation frequency, checkpoint saving frequency and retention
+  separately, with explicit units; identify protected model-selection candidates
+  so retention cannot silently delete them;
+- verify that the configured metrics are actually computed, aggregated across
+  microbatches/ranks, logged and displayed, and that evaluation and saving fire
+  at their configured optimizer steps. Declaring a metric name is insufficient.
+
+For autoregressive classification, class accuracy uses the label decision at
+the answer position. Accuracy over answer-format or end tokens is not a
+substitute; state the candidate-label prediction rule and keep it consistent
+with validation. Different tasks may need different metrics, not these names
+copied blindly. Use the existing trainer/logger boundaries rather than adding
+an elaborate process to compensate for missing basic settings.
 
 ### 5. Separate Efficiency Mechanisms
 

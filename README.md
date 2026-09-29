@@ -11,8 +11,8 @@ references, scripts, or assets the skill needs.
 | --- | --- | --- | --- |
 | [`feishu-task-sync`](skills/feishu-task-sync/) | 0.3.21 | 飞书 Todo 后台同步 · 每小时同步 + 每天 11:00 摘要 + 心跳广播。需要飞书自建应用 + OAuth。 | [Install guide](skills/feishu-task-sync/README.md) · [Agent spec](skills/feishu-task-sync/SKILL.md) |
 | [`software-design`](skills/software-design/) | 0.1.0 | Software ownership, domain contracts and behavior-preserving architectural changes. | [Agent spec](skills/software-design/SKILL.md) |
-| [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.3.0 | Protect objectives, reward/evaluation meaning and reproducibility during implementation. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
-| [`research-methodology`](skills/research-methodology/) | 0.3.1 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
+| [`ml-rl-experiment-engineering`](skills/ml-rl-experiment-engineering/) | 0.3.1 | Protect objectives, reward/evaluation meaning and reproducibility during implementation. | [Agent spec](skills/ml-rl-experiment-engineering/SKILL.md) |
+| [`research-methodology`](skills/research-methodology/) | 0.3.2 | End-to-end research methodology: question framing, experiment design, analysis, report writing, and method distillation. | [Agent spec](skills/research-methodology/SKILL.md) |
 | [`task-first-ui-ux`](skills/task-first-ui-ux/) | 0.2.0 | User-facing information, documentation navigation and verified interaction repair. | [Agent spec](skills/task-first-ui-ux/SKILL.md) |
 
 ## Choose By The Decision, Not The Repository
